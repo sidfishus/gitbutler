@@ -1708,6 +1708,7 @@ dependencies = [
  "insta",
  "itertools",
  "md5",
+ "sapling-renderdag",
  "schemars 1.2.1",
  "serde",
  "tempfile",
