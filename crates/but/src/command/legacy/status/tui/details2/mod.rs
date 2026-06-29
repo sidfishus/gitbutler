@@ -99,17 +99,13 @@ impl Details2 {
         let syntax_set = self.syntax_set.get().unwrap();
         let syntax_theme = self.syntax_theme.get().unwrap();
 
-        let mut n = 0;
-        for line in &self.lines {
-            if matches!(line, RenderLine::EndOfSection) {
-                continue;
-            }
+        for (n, line) in self.lines.iter().enumerate() {
+            let n = n as u16;
 
             if n >= area.height {
                 break;
             }
             let y = area.y + n;
-
             let line_area = Rect {
                 x: area.x,
                 y,
@@ -155,10 +151,7 @@ impl Details2 {
 
                     frame.render_widget(highlighted_line.borrow().as_ref().unwrap(), line_area);
                 }
-                RenderLine::EndOfSection => unreachable!(),
             }
-
-            n += 1;
         }
     }
 
@@ -216,10 +209,6 @@ impl RenderOut {
             bg,
         });
     }
-
-    fn push_end_of_section(&mut self) {
-        self.buf.push(RenderLine::EndOfSection);
-    }
 }
 
 #[derive(Debug)]
@@ -237,7 +226,6 @@ enum RenderLine {
         path: Arc<BString>,
         bg: Option<Color>,
     },
-    EndOfSection,
 }
 
 fn render_commit(
@@ -264,14 +252,14 @@ fn render_commit(
             .chain(render_signature(&commit_details.commit.committer, theme)),
     ));
 
-    out.push_end_of_section();
+    // out.push_end_of_section();
 
     out.push_text("".into());
 
     let message = commit_details.commit.message.to_string();
     if !message.is_empty() {
         out.push_text_to_wrap(message);
-        out.push_end_of_section();
+        // out.push_end_of_section();
         out.push_text("".into());
     }
 
@@ -324,7 +312,7 @@ fn build_tree_changes(
                             out,
                         );
 
-                        out.push_end_of_section();
+                        // out.push_end_of_section();
                     }
                 }
                 UnifiedPatch::Binary => {
@@ -337,7 +325,7 @@ fn build_tree_changes(
 
                     out.push_text("Binary file - no diff available".into());
 
-                    out.push_end_of_section();
+                    // out.push_end_of_section();
                 }
                 UnifiedPatch::TooLarge { size_in_bytes } => {
                     render_hunk_path_header(
@@ -352,7 +340,7 @@ fn build_tree_changes(
                             .into(),
                     );
 
-                    out.push_end_of_section();
+                    // out.push_end_of_section();
                 }
             }
         }
