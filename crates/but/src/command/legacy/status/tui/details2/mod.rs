@@ -1,27 +1,31 @@
-#![allow(warnings)]
+use std::{
+    cell::RefCell,
+    iter::{once, repeat_n},
+    sync::Arc,
+};
 
-use std::iter::{once, repeat_n};
-
-use bstr::{BStr, ByteSlice as _};
+use bstr::{BStr, BString, ByteSlice as _};
 use but_core::{
     UnifiedPatch,
     ui::{TreeChange, TreeStatus},
     unified_diff::DiffHunk,
 };
-use but_ctx::Context;
+use but_ctx::{Context, OnDemand};
 use gix::{ObjectId, actor::Signature};
 use ratatui::{
     Frame,
     layout::Rect,
+    style::{Color, Stylize as _},
     text::{Line, Span},
-    widgets::ListItem,
 };
+use syntect::{easy::HighlightLines, highlighting, parsing::SyntaxSet};
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
     CliId,
     command::legacy::status::tui::{Message, details::DetailsMessage},
     theme::Theme,
+    utils::DebugAsType,
 };
 
 #[derive(Debug)]
@@ -29,6 +33,8 @@ pub struct Details2 {
     theme: &'static Theme,
     selection: Option<CliId>,
     lines: Vec<RenderLine>,
+    syntax_set: DebugAsType<OnDemand<SyntaxSet>>,
+    syntax_theme: DebugAsType<OnDemand<highlighting::Theme>>,
 }
 
 impl Details2 {
@@ -37,6 +43,8 @@ impl Details2 {
             theme,
             selection: None,
             lines: Default::default(),
+            syntax_set: OnDemand::new(|| Ok(SyntaxSet::load_defaults_newlines())).into(),
+            syntax_theme: OnDemand::new(|| theme.load_syntax_highlighting_theme()).into(),
         }
     }
 
@@ -69,7 +77,7 @@ impl Details2 {
                 commit_id: commit, ..
             } => {
                 let mut out = RenderOut::default();
-                render_commit(ctx, *commit, &mut out, self.theme)?;
+                render_commit(ctx, *commit, self.theme, &mut out)?;
                 out.buf
             }
             CliId::UncommittedHunkOrFile(..)
@@ -87,7 +95,10 @@ impl Details2 {
         Ok(true)
     }
 
-    pub fn render(&self, help_shown: bool, has_focus: bool, area: Rect, frame: &mut Frame) {
+    pub fn render(&self, _help_shown: bool, _has_focus: bool, area: Rect, frame: &mut Frame) {
+        let syntax_set = self.syntax_set.get().unwrap();
+        let syntax_theme = self.syntax_theme.get().unwrap();
+
         let mut n = 0;
         for line in &self.lines {
             if matches!(line, RenderLine::EndOfSection) {
@@ -113,8 +124,36 @@ impl Details2 {
                 RenderLine::TextToWrap { text } => {
                     frame.render_widget(&**text, line_area);
                 }
-                RenderLine::RawCode { raw_line, .. } => {
-                    frame.render_widget(raw_line, line_area);
+                RenderLine::RawCode {
+                    highlighted_line,
+                    line_numbers,
+                    code,
+                    path,
+                    bg,
+                } => {
+                    if highlighted_line.borrow().is_none() {
+                        let syntax = {
+                            let path = path.to_path_lossy();
+                            path.extension()
+                                .and_then(|ext| syntax_set.find_syntax_by_extension(ext.to_str()?))
+                                .or_else(|| {
+                                    path.file_name().and_then(|file_name| {
+                                        syntax_set.find_syntax_by_extension(file_name.to_str()?)
+                                    })
+                                })
+                                .unwrap_or_else(|| syntax_set.find_syntax_plain_text())
+                        };
+
+                        // TODO: should this be cached?
+                        let mut highlight_lines = HighlightLines::new(syntax, &syntax_theme);
+
+                        *highlighted_line.borrow_mut() =
+                            Some(Line::from_iter(line_numbers.clone().into_iter().chain(
+                                syntax_highlight(code, *bg, &mut highlight_lines, &syntax_set),
+                            )));
+                    }
+
+                    frame.render_widget(highlighted_line.borrow().as_ref().unwrap(), line_area);
                 }
                 RenderLine::EndOfSection => unreachable!(),
             }
@@ -127,9 +166,23 @@ impl Details2 {
     pub fn try_handle_message(
         &mut self,
         msg: DetailsMessage,
-        viewport: Rect,
-        messages: &mut Vec<Message>,
+        _viewport: Rect,
+        _messages: &mut Vec<Message>,
     ) -> anyhow::Result<()> {
+        match msg {
+            DetailsMessage::ScrollUp(_) => {}
+            DetailsMessage::ScrollDown(_) => {}
+            DetailsMessage::SelectNextSection => {}
+            DetailsMessage::SelectPrevSection => {}
+            DetailsMessage::Deselect => {}
+            DetailsMessage::SelectFirstSection => {}
+            DetailsMessage::CopyCurrentHunk => {}
+            DetailsMessage::GotoTop => {}
+            DetailsMessage::GotoBottom => {}
+            DetailsMessage::StartRub => {}
+            DetailsMessage::Unlock => {}
+        }
+
         Ok(())
     }
 }
@@ -150,14 +203,17 @@ impl RenderOut {
 
     fn push_raw_code(
         &mut self,
-        raw_line: Line<'static>,
         line_numbers: Vec<Span<'static>>,
         code: String,
+        bg: Option<Color>,
+        path: Arc<BString>,
     ) {
         self.buf.push(RenderLine::RawCode {
-            raw_line,
+            highlighted_line: RefCell::new(None),
             line_numbers,
             code,
+            path,
+            bg,
         });
     }
 
@@ -175,9 +231,11 @@ enum RenderLine {
         text: String,
     },
     RawCode {
-        raw_line: Line<'static>,
+        highlighted_line: RefCell<Option<Line<'static>>>,
         line_numbers: Vec<Span<'static>>,
         code: String,
+        path: Arc<BString>,
+        bg: Option<Color>,
     },
     EndOfSection,
 }
@@ -185,8 +243,8 @@ enum RenderLine {
 fn render_commit(
     ctx: &Context,
     commit: ObjectId,
-    out: &mut RenderOut,
     theme: &'static Theme,
+    out: &mut RenderOut,
 ) -> anyhow::Result<()> {
     let commit_details =
         but_api::diff::commit_details(ctx, commit, but_api::diff::ComputeLineStats::No)?;
@@ -223,7 +281,7 @@ fn render_commit(
         .map(|change| TreeChange::from(change.clone()))
         .collect::<Vec<_>>();
 
-    build_tree_changes(ctx, &tree_changes, out, theme);
+    build_tree_changes(ctx, &tree_changes, theme, out);
 
     Ok(())
 }
@@ -231,10 +289,11 @@ fn render_commit(
 fn build_tree_changes(
     ctx: &Context,
     tree_changes: &[TreeChange],
-    out: &mut RenderOut,
     theme: &'static Theme,
+    out: &mut RenderOut,
 ) {
     for tree_change in tree_changes {
+        let path = Arc::new(tree_change.path_bytes.clone());
         if let Some(patch) = but_api::diff::tree_change_diffs(ctx, tree_change.clone())
             .ok()
             .flatten()
@@ -243,8 +302,8 @@ fn build_tree_changes(
                 UnifiedPatch::Patch {
                     hunks,
                     is_result_of_binary_to_text_conversion,
-                    lines_added,
-                    lines_removed,
+                    lines_added: _,
+                    lines_removed: _,
                 } => {
                     let mut first_hunk = true;
                     for diff_hunk in hunks {
@@ -258,7 +317,7 @@ fn build_tree_changes(
                         }
 
                         build_unified_patch(
-                            tree_change.path.as_ref(),
+                            &path,
                             diff_hunk,
                             is_result_of_binary_to_text_conversion,
                             theme,
@@ -320,6 +379,7 @@ fn render_signature(
 }
 
 enum ShortIdOrTreeStatus<'a> {
+    #[expect(dead_code)]
     ShortId(&'a str),
     TreeStatus(&'a TreeStatus),
 }
@@ -381,7 +441,7 @@ fn bordered_line_top_right_bottom(
 }
 
 fn build_unified_patch(
-    path: &BStr,
+    path: &Arc<BString>,
     hunk: DiffHunk,
     is_result_of_binary_to_text_conversion: bool,
     theme: &'static Theme,
@@ -427,7 +487,7 @@ fn build_unified_patch(
     let mut new_line_num = new_start;
 
     for line in diff.lines().skip(1) {
-        let (line_numbers, code) = if let Some(rest) = line.strip_prefix(b"+") {
+        let (line_numbers, code, bg) = if let Some(rest) = line.strip_prefix(b"+") {
             let code = rest.to_str_lossy().to_string();
             let line_numbers = Vec::from_iter([
                 Span::raw(" ".repeat(old_width as _)),
@@ -438,7 +498,7 @@ fn build_unified_patch(
                 Span::raw("+").style(theme.addition_rich),
             ]);
             new_line_num += 1;
-            (line_numbers, code)
+            (line_numbers, code, theme.addition_rich.bg)
         } else if let Some(rest) = line.strip_prefix(b"-") {
             let code = rest.to_str_lossy().to_string();
             let line_numbers = Vec::from_iter([
@@ -450,7 +510,7 @@ fn build_unified_patch(
                 Span::raw("-").style(theme.deletion_rich),
             ]);
             old_line_num += 1;
-            (line_numbers, code)
+            (line_numbers, code, theme.deletion_rich.bg)
         } else {
             let line = line.strip_prefix(b" ").unwrap_or(line);
             let code = line.to_str_lossy().to_string();
@@ -464,20 +524,39 @@ fn build_unified_patch(
             ]);
             old_line_num += 1;
             new_line_num += 1;
-            (line_numbers, code)
+            (line_numbers, code, None)
         };
 
-        let raw_line = Line::from_iter(
-            line_numbers
-                .clone()
-                .into_iter()
-                .chain([Span::raw(code.clone())]),
-        );
-
-        out.push_raw_code(raw_line, line_numbers, code);
+        out.push_raw_code(line_numbers, code, bg, Arc::clone(path));
     }
 }
 
 fn num_digits(n: u32) -> u32 {
     if n == 0 { 1 } else { n.ilog10() + 1 }
+}
+
+fn syntax_highlight(
+    code: &str,
+    bg: Option<Color>,
+    highlight_lines: &mut HighlightLines<'_>,
+    syntax_set: &SyntaxSet,
+) -> Vec<Span<'static>> {
+    let Ok(ranges) = highlight_lines.highlight_line(code, syntax_set) else {
+        return Vec::from([Span::raw(code.to_owned())]);
+    };
+
+    ranges
+        .iter()
+        .map(|(style, text)| {
+            let color = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
+            Span::raw(text.to_string()).fg(color)
+        })
+        .map(move |span| {
+            if let Some(background) = bg {
+                span.bg(background)
+            } else {
+                span
+            }
+        })
+        .collect::<Vec<_>>()
 }
