@@ -18,7 +18,7 @@ use crate::{
     CliId,
     command::legacy::status::{
         FilesStatusFlag, StatusFlags, StatusOutputLine, TuiLaunchOptions, TuiOutcome,
-        TuiRunOptions, output::StatusOutputLineData,
+        TuiRunOptions, output::StatusOutputLineData, tui::details2::Details2,
     },
     theme::Theme,
     tui::TerminalGuard,
@@ -97,7 +97,7 @@ pub struct App {
     pub app_key_binds: AppKeyBinds,
     pub highlight: Highlights<CliId>,
     pub modal: Option<Modal>,
-    pub details: Details,
+    pub details: DetailOldOrNew,
     pub is_details_visible: bool,
     pub launch_options: TuiLaunchOptions,
     pub delayed_messages: Vec<Message>,
@@ -129,9 +129,18 @@ impl App {
 
         let theme = crate::theme::get();
 
-        let (mut details, is_details_visible) = (Details::new(theme), launch_options.show_diff);
+        let (mut details, is_details_visible) = (
+            // DetailOldOrNew::Old(Details::new(theme)),
+            DetailOldOrNew::New(Details2::new(theme)),
+            launch_options.show_diff,
+        );
         if is_details_visible {
-            details.mark_dirty();
+            match &mut details {
+                DetailOldOrNew::Old(details) => {
+                    details.mark_dirty();
+                }
+                DetailOldOrNew::New(_) => {}
+            }
         }
 
         let app_key_binds = AppKeyBinds {
@@ -230,11 +239,13 @@ impl App {
         let terminal_area: Rect = terminal_guard.terminal_mut().size()?.into();
         let visible_height = status_viewport_height(self, terminal_area);
 
-        if self
-            .details
-            .needs_update_after_message(self.is_details_visible, &msg)
-        {
-            self.details.mark_dirty();
+        match &mut self.details {
+            DetailOldOrNew::Old(details) => {
+                if details.needs_update_after_message(self.is_details_visible, &msg) {
+                    details.mark_dirty();
+                }
+            }
+            DetailOldOrNew::New(_) => {}
         }
 
         match msg {
@@ -439,8 +450,14 @@ impl App {
             },
             Message::Details(details_message) => {
                 let details_viewport = details_viewport(self, terminal_area);
-                self.details
-                    .try_handle_message(details_message, details_viewport, messages)?;
+                match &mut self.details {
+                    DetailOldOrNew::Old(details) => {
+                        details.try_handle_message(details_message, details_viewport, messages)?;
+                    }
+                    DetailOldOrNew::New(details2) => {
+                        details2.try_handle_message(details_message, details_viewport, messages)?;
+                    }
+                }
             }
             Message::RegisterOutOfBandMessage(rx) => {
                 self.incoming_out_of_band_messages.push(rx);
@@ -1173,4 +1190,11 @@ impl FuzzyPickerItem for GotoBranchItem {
             Self::Uncommitted => theme.info,
         }
     }
+}
+
+#[derive(Debug)]
+#[expect(clippy::large_enum_variant)]
+pub enum DetailOldOrNew {
+    Old(Details),
+    New(Details2),
 }

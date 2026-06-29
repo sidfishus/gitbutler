@@ -23,8 +23,8 @@ use crate::{
         tui::{
             CommandModeKind, Markable,
             app::{
-                CommandMode, CommitMessageComposer, CommitMode, JumpMode, MoveMode, MoveSource,
-                MoveStackMode, RubMode, RubSource, StackMode,
+                CommandMode, CommitMessageComposer, CommitMode, DetailOldOrNew, JumpMode, MoveMode,
+                MoveSource, MoveStackMode, RubMode, RubSource, StackMode,
                 rub_from_detail_view_operation_display, rub_operation_display,
             },
         },
@@ -78,22 +78,46 @@ pub fn render_app(app: &App, frame: &mut Frame) {
 
             let details_block_area = details_block.inner(details_layout[1]);
             frame.render_widget(details_block, details_layout[1]);
-            app.details.render(
-                matches!(app.modal, Some(Modal::Help { .. })),
-                app.has_focus,
-                details_block_area,
-                frame,
-            );
+            match &app.details {
+                DetailOldOrNew::Old(details) => {
+                    details.render(
+                        matches!(app.modal, Some(Modal::Help { .. })),
+                        app.has_focus,
+                        details_block_area,
+                        frame,
+                    );
+                }
+                DetailOldOrNew::New(details2) => {
+                    details2.render(
+                        matches!(app.modal, Some(Modal::Help { .. })),
+                        app.has_focus,
+                        details_block_area,
+                        frame,
+                    );
+                }
+            }
         } else {
             let block = pane_block(app, true, Borders::BOTTOM);
             let inner_area = block.inner(status_layout.status_area);
             frame.render_widget(block, status_layout.status_area);
-            app.details.render(
-                matches!(app.modal, Some(Modal::Help { .. })),
-                app.has_focus,
-                inner_area,
-                frame,
-            );
+            match &app.details {
+                DetailOldOrNew::Old(details) => {
+                    details.render(
+                        matches!(app.modal, Some(Modal::Help { .. })),
+                        app.has_focus,
+                        inner_area,
+                        frame,
+                    );
+                }
+                DetailOldOrNew::New(details2) => {
+                    details2.render(
+                        matches!(app.modal, Some(Modal::Help { .. })),
+                        app.has_focus,
+                        inner_area,
+                        frame,
+                    );
+                }
+            }
         }
     } else {
         let details_focused = matches!(&*app.mode, Mode::Details(..));
@@ -111,12 +135,24 @@ pub fn render_app(app: &App, frame: &mut Frame) {
             let details_separator_area = details_block.inner(details_area);
             frame.render_widget(details_block, details_area);
             render_details_separator(app, details_separator_area, frame);
-            app.details.render(
-                matches!(app.modal, Some(Modal::Help { .. })),
-                app.has_focus,
-                inner_area,
-                frame,
-            );
+            match &app.details {
+                DetailOldOrNew::Old(details) => {
+                    details.render(
+                        matches!(app.modal, Some(Modal::Help { .. })),
+                        app.has_focus,
+                        inner_area,
+                        frame,
+                    );
+                }
+                DetailOldOrNew::New(details2) => {
+                    details2.render(
+                        matches!(app.modal, Some(Modal::Help { .. })),
+                        app.has_focus,
+                        inner_area,
+                        frame,
+                    );
+                }
+            }
         }
     }
 
@@ -1231,7 +1267,12 @@ fn render_debug(app: &App, area: Rect, frame: &mut Frame) {
             .map(|line| ListItem::new(line.to_owned())),
     );
 
-    let details_selection = format!("{:#?}", app.details.selection());
+    let details_selection = match &app.details {
+        DetailOldOrNew::Old(details) => {
+            format!("{:#?}", details.selection())
+        }
+        DetailOldOrNew::New(_) => String::new(),
+    };
     let details_selection = once(ListItem::new("Details selection").black().on_blue()).chain(
         details_selection
             .lines()

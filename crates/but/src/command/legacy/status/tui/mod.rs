@@ -57,6 +57,7 @@ mod confirm;
 mod copy_selection_picker;
 mod cursor;
 mod details;
+mod details2;
 mod event_polling;
 mod file_browser;
 mod fps;
@@ -256,10 +257,15 @@ where
     app.updates += 1;
 
     // update at full speed while we're rendering the diff
-    let event_poll_timeout = if app.details.needs_update(app.is_details_visible) {
-        Duration::from_millis(0)
-    } else {
-        Duration::from_millis(30)
+    let event_poll_timeout = match &app.details {
+        app::DetailOldOrNew::Old(details) => {
+            if details.needs_update(app.is_details_visible) {
+                Duration::from_millis(0)
+            } else {
+                Duration::from_millis(30)
+            }
+        }
+        app::DetailOldOrNew::New(_) => Duration::from_millis(30),
     };
     // poll terminal events
     for event in event_polling.poll(event_poll_timeout)? {
@@ -338,8 +344,13 @@ where
         app.should_render = true;
     }
 
-    if app.details.update_highlight() {
-        app.should_render = true;
+    match &mut app.details {
+        app::DetailOldOrNew::Old(details) => {
+            if details.update_highlight() {
+                app.should_render = true;
+            }
+        }
+        app::DetailOldOrNew::New(_) => {}
     }
 
     let selection = app
@@ -348,22 +359,31 @@ where
         .and_then(|line| line.data.cli_id())
         .map(|id| &**id);
 
-    if app.details.needs_update(app.is_details_visible) {
-        match app.details.update(ctx, selection) {
-            Ok(Some(result)) => match result {
-                RenderNextChunkResult::Done => {
-                    if app.launch_options.quit_after_rendering_full_diff {
-                        app.outcome = Some(TuiOutcome::None);
+    match &mut app.details {
+        app::DetailOldOrNew::Old(details) => {
+            if details.needs_update(app.is_details_visible) {
+                match details.update(ctx, selection) {
+                    Ok(Some(result)) => match result {
+                        RenderNextChunkResult::Done => {
+                            if app.launch_options.quit_after_rendering_full_diff {
+                                app.outcome = Some(TuiOutcome::None);
+                            }
+                        }
+                        RenderNextChunkResult::Meta | RenderNextChunkResult::Diff => {}
+                    },
+                    Ok(None) => {}
+                    Err(err) => {
+                        messages.push(Message::ShowError(Arc::new(err)));
                     }
                 }
-                RenderNextChunkResult::Meta | RenderNextChunkResult::Diff => {}
-            },
-            Ok(None) => {}
-            Err(err) => {
-                messages.push(Message::ShowError(Arc::new(err)));
+                app.should_render = true;
             }
         }
-        app.should_render = true;
+        app::DetailOldOrNew::New(details2) => {
+            if details2.update(ctx, selection)? {
+                app.should_render = true;
+            }
+        }
     }
 
     if let Some(file_browser) = &mut app.file_browser
