@@ -1,7 +1,7 @@
 use std::{
     cell::RefCell,
     fmt::Display,
-    sync::{Arc, mpsc::TryRecvError},
+    sync::{Arc, atomic::AtomicUsize, mpsc::TryRecvError},
     time::Instant,
 };
 
@@ -83,7 +83,15 @@ impl Details2 {
         }
     }
 
-    pub fn update(&mut self, ctx: &Context, new_selection: Option<&CliId>) -> anyhow::Result<bool> {
+    pub fn num_threads(&self) -> usize {
+        NUM_THREADS.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn update(
+        &mut self,
+        ctx: &mut Context,
+        new_selection: Option<&CliId>,
+    ) -> anyhow::Result<bool> {
         let selection = match (self.selection.as_ref(), new_selection) {
             (None, None) => {
                 // no selection
@@ -139,11 +147,49 @@ impl Details2 {
                     rendering::render_branch(name, ctx, theme, id_gen, line_writer)
                 })
             }
-            CliId::UncommittedHunkOrFile(..)
-            | CliId::PathPrefix { .. }
-            | CliId::CommittedFile { .. }
-            | CliId::Uncommitted { .. }
-            | CliId::Stack { .. } => {
+            CliId::Uncommitted { .. } => {
+                self.spawn_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
+                    rendering::render_uncommitted(ctx, theme, id_gen, line_writer)
+                })
+            }
+            CliId::UncommittedHunkOrFile(uncommitted) => {
+                let uncommitted = uncommitted.clone();
+                self.spawn_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
+                    rendering::render_uncommitted_hunk(uncommitted, ctx, theme, id_gen, line_writer)
+                })
+            }
+            CliId::CommittedFile {
+                commit_id,
+                path,
+                id,
+            } => {
+                let commit = *commit_id;
+                let path = path.clone();
+                let id = id.clone();
+                self.spawn_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
+                    rendering::render_committed_file(
+                        commit,
+                        path,
+                        id,
+                        ctx,
+                        theme,
+                        id_gen,
+                        line_writer,
+                    )
+                })
+            }
+            CliId::Stack { id, .. } => {
+                self.lines.clear();
+                let mut id_gen = IdGen::new(self.strings.clone());
+                let mut id_gen = id_gen.scoped("stack");
+                self.lines.push(DetailsLine::Text {
+                    id: id_gen.new_id(id),
+                    line: Line::from("(stack assignments are not supported)")
+                        .style(self.theme.hint),
+                });
+                Ok(true)
+            }
+            CliId::PathPrefix { .. } => {
                 self.lines.clear();
                 Ok(true)
             }
@@ -153,7 +199,7 @@ impl Details2 {
     fn spawn_render_thread<F>(&mut self, ctx: &Context, f: F) -> anyhow::Result<bool>
     where
         F: FnOnce(
-                &Context,
+                &mut Context,
                 &'static Theme,
                 &mut IdGen<'_>,
                 &mut dyn LineWriter,
@@ -161,6 +207,8 @@ impl Details2 {
             + Send
             + 'static,
     {
+        let num_threads_guard = NumThreadsGuard::new();
+
         match &mut self.line_reader {
             ChannelLineReader::NotStarted => {
                 tracing::debug!("spawning thread");
@@ -174,16 +222,19 @@ impl Details2 {
                 let theme = self.theme;
                 let ctx = ctx.to_sync();
                 std::thread::spawn(move || {
-                    let ctx = ctx.into_thread_local();
+                    let mut ctx = ctx.into_thread_local();
                     let mut id_gen = IdGen::new(strings);
 
-                    if let Err(err) = f(&ctx, theme, &mut id_gen, &mut line_writer)
+                    if let Err(err) = f(&mut ctx, theme, &mut id_gen, &mut line_writer)
                         .context("failed rendering commit diff")
                         && err.downcast_ref::<SendErrorCode>().is_none()
                     {
                         tracing::error!("{err:#}");
                     }
+
+                    drop(num_threads_guard);
                 });
+
                 Ok(true)
             }
             ChannelLineReader::Started { rx, start } => {
@@ -564,4 +615,21 @@ fn syntax_highlight(
 
 fn num_digits(n: u32) -> u32 {
     if n == 0 { 1 } else { n.ilog10() + 1 }
+}
+
+static NUM_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+struct NumThreadsGuard;
+
+impl NumThreadsGuard {
+    fn new() -> Self {
+        NUM_THREADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for NumThreadsGuard {
+    fn drop(&mut self) {
+        NUM_THREADS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }

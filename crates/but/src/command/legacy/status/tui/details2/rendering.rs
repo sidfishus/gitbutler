@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use anyhow::bail;
 use bstr::{BStr, BString, ByteSlice as _};
 use but_core::{
     UnifiedPatch,
@@ -10,26 +11,35 @@ use but_core::{
     unified_diff::DiffHunk,
 };
 use but_ctx::Context;
+use but_hunk_assignment::HunkAssignment;
 use gix::{ObjectId, actor::Signature};
-use ratatui::text::{Line, Span};
+use ratatui::{
+    style::Stylize as _,
+    text::{Line, Span},
+};
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
-    command::legacy::status::tui::details2::{CodeLineNumbers, IdGen, LineWriter, SectionId, num_digits},
+    CliId, IdMap,
+    command::legacy::status::tui::details2::{
+        CodeLineNumbers, IdGen, LineWriter, SectionId, num_digits,
+    },
+    id::{ShortId, UncommittedHunk, UncommittedHunkOrFile},
     theme::Theme,
 };
 
 pub fn render_commit(
     commit: ObjectId,
-    ctx: &Context,
+    ctx: &mut Context,
     theme: &'static Theme,
     id_gen: &mut IdGen<'_>,
     out: &mut dyn LineWriter,
 ) -> anyhow::Result<()> {
+    let mut id_gen = id_gen.scoped("commits");
+    let mut id_gen = id_gen.scoped(commit);
+
     let commit_details =
         but_api::diff::commit_details(ctx, commit, but_api::diff::ComputeLineStats::No)?;
-
-    let mut id_gen = id_gen.scoped(commit);
 
     let commit_header_id = id_gen.new_id("header");
     out.push_text(
@@ -76,16 +86,180 @@ pub fn render_commit(
 
 pub fn render_branch(
     name: String,
-    ctx: &Context,
+    ctx: &mut Context,
     theme: &'static Theme,
     id_gen: &mut IdGen<'_>,
     out: &mut dyn LineWriter,
 ) -> anyhow::Result<()> {
-    let tree_changes = but_api::branch::branch_diff(ctx, name.clone())?;
-
+    let mut id_gen = id_gen.scoped("branches");
     let mut id_gen = id_gen.scoped(&name);
 
+    let tree_changes = but_api::branch::branch_diff(ctx, name.clone())?;
+
     build_tree_changes(ctx, &tree_changes.changes, theme, &mut id_gen, out)?;
+
+    Ok(())
+}
+
+pub fn render_uncommitted(
+    ctx: &mut Context,
+    theme: &'static Theme,
+    id_gen: &mut IdGen<'_>,
+    out: &mut dyn LineWriter,
+) -> anyhow::Result<()> {
+    let mut id_gen = id_gen.scoped("uncommitted");
+
+    let wt_changes = but_api::diff::changes_in_worktree(ctx)?;
+    let id_map = IdMap::legacy_new_from_context(ctx, Some(wt_changes.assignments))?;
+    let uncommitted_hunks = filter_uncommitted_hunks(ctx, &id_map, |hunk_assignment| {
+        hunk_assignment.stack_id.is_none()
+    })?;
+
+    for (raw_id, UncommittedHunk { hunk_assignment }) in uncommitted_hunks {
+        let id = id_gen.new_id(raw_id);
+
+        build_hunk_path_header(
+            id,
+            hunk_assignment.path_bytes.as_ref(),
+            Some(ShortIdOrTreeStatus::ShortId(raw_id)),
+            theme,
+            out,
+        )?;
+
+        out.push_text(id, "".into())?;
+
+        build_hunk_assignment(id, hunk_assignment, theme, out)?;
+
+        out.push_empty_line()?;
+    }
+
+    Ok(())
+}
+
+pub fn render_uncommitted_hunk(
+    hunk: UncommittedHunkOrFile,
+    ctx: &mut Context,
+    theme: &'static Theme,
+    id_gen: &mut IdGen<'_>,
+    out: &mut dyn LineWriter,
+) -> anyhow::Result<()> {
+    let mut id_gen = id_gen.scoped("hunk");
+    let mut id_gen = id_gen.scoped(&hunk.id);
+
+    let wt_changes = but_api::diff::changes_in_worktree(ctx)?;
+    let id_map = IdMap::legacy_new_from_context(ctx, Some(wt_changes.assignments))?;
+    let uncommitted_hunks = filter_uncommitted_hunks(ctx, &id_map, |hunk_assignment| {
+        uncommitted_hunk_matches_selection(hunk_assignment, &hunk)
+    })?;
+
+    for (raw_id, UncommittedHunk { hunk_assignment }) in uncommitted_hunks {
+        let id = id_gen.new_id(raw_id);
+
+        build_hunk_path_header(
+            id,
+            hunk_assignment.path_bytes.as_ref(),
+            Some(ShortIdOrTreeStatus::ShortId(raw_id)),
+            theme,
+            out,
+        )?;
+
+        build_hunk_assignment(id, hunk_assignment, theme, out)?;
+    }
+
+    Ok(())
+}
+
+pub fn render_committed_file(
+    commit: ObjectId,
+    path: BString,
+    id: ShortId,
+    ctx: &mut Context,
+    theme: &'static Theme,
+    id_gen: &mut IdGen<'_>,
+    out: &mut dyn LineWriter,
+) -> anyhow::Result<()> {
+    let mut id_gen = id_gen.scoped("committed_file");
+    let mut id_gen = id_gen.scoped(commit);
+    let mut id_gen = id_gen.scoped(id);
+
+    let commit_details =
+        but_api::diff::commit_details(ctx, commit, but_api::diff::ComputeLineStats::No)?;
+
+    let tree_changes = commit_details
+        .diff_with_first_parent
+        .iter()
+        .filter(|change| change.path == path)
+        .map(|change| TreeChange::from(change.clone()))
+        .collect::<Vec<_>>();
+
+    build_tree_changes(ctx, &tree_changes, theme, &mut id_gen, out)?;
+
+    Ok(())
+}
+
+fn build_hunk_path_header(
+    id: SectionId,
+    path: &BStr,
+    status: Option<ShortIdOrTreeStatus<'_>>,
+    theme: &'static Theme,
+    out: &mut dyn LineWriter,
+) -> anyhow::Result<()> {
+    let status = status.map(|id_or_status| match id_or_status {
+        ShortIdOrTreeStatus::ShortId(id) => Span::raw(id.to_owned()).blue(),
+        ShortIdOrTreeStatus::TreeStatus(status) => change_status(status, theme),
+    });
+    let path = path.to_string();
+    let path_line = Line::from_iter(
+        [Span::raw(" ")]
+            .into_iter()
+            .chain(
+                status
+                    .into_iter()
+                    .flat_map(|status| [status, Span::raw(" ")]),
+            )
+            .chain([Span::raw(path)]),
+    );
+    bordered_line_top_right_bottom(id, path_line, out, theme)?;
+    Ok(())
+}
+
+fn build_hunk_assignment(
+    id: SectionId,
+    hunk_assignment: &HunkAssignment,
+    theme: &'static Theme,
+    out: &mut dyn LineWriter,
+) -> anyhow::Result<()> {
+    if let Some(hunk_header) = hunk_assignment.hunk_header {
+        if let Some(diff) = hunk_assignment.diff.clone() {
+            let hunk = DiffHunk {
+                old_start: hunk_header.old_start,
+                old_lines: hunk_header.old_lines,
+                new_start: hunk_header.new_start,
+                new_lines: hunk_header.new_lines,
+                diff,
+            };
+
+            let is_result_of_binary_to_text_conversion = false;
+
+            let path = Arc::new(hunk_assignment.path_bytes.clone());
+
+            build_unified_patch(
+                id,
+                &path,
+                hunk,
+                is_result_of_binary_to_text_conversion,
+                theme,
+                out,
+            )?;
+        } else {
+            out.push_text(id, "No diff available".into())?;
+        }
+    } else {
+        out.push_text(
+            id,
+            "No diff available - file is either empty, binary, or too large".into(),
+        )?;
+    }
 
     Ok(())
 }
@@ -371,4 +545,70 @@ fn build_unified_patch(
     }
 
     Ok(())
+}
+
+fn filter_uncommitted_hunks<'a, F>(
+    ctx: &'a mut Context,
+    id_map: &'a IdMap,
+    mut filter: F,
+) -> anyhow::Result<Vec<(&'a str, &'a UncommittedHunk)>>
+where
+    F: FnMut(&HunkAssignment) -> bool,
+{
+    let mut uncommitted_hunks = id_map
+        .uncommitted_hunks
+        .iter()
+        .filter(move |(_, hunk)| filter(&hunk.hunk_assignment))
+        .map(|(raw_id, hunk)| {
+            let cli_ids = id_map.parse_using_context(raw_id, ctx)?;
+            if cli_ids.len() == 1 {
+                Ok((&**raw_id, hunk))
+            } else if cli_ids.is_empty() {
+                bail!("'{raw_id}' no found")
+            } else {
+                bail!(
+                    "'{raw_id}' resolved to more than one hunk ({})",
+                    cli_ids.len()
+                )
+            }
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    uncommitted_hunks.sort_by(|(id_a, hunk_a), (id_b, hunk_b)| {
+        (
+            &hunk_a.hunk_assignment.path_bytes,
+            hunk_a
+                .hunk_assignment
+                .hunk_header
+                .as_ref()
+                .map(|header| header.old_start),
+            id_a,
+        )
+            .cmp(&(
+                &hunk_b.hunk_assignment.path_bytes,
+                hunk_b
+                    .hunk_assignment
+                    .hunk_header
+                    .as_ref()
+                    .map(|header| header.old_start),
+                id_b,
+            ))
+    });
+
+    Ok(uncommitted_hunks)
+}
+
+/// Returns true if `hunk_assignment` is part of the selected uncommitted entity.
+fn uncommitted_hunk_matches_selection(
+    hunk_assignment: &HunkAssignment,
+    hunk: &UncommittedHunkOrFile,
+) -> bool {
+    let selected_hunk = hunk.hunk_assignments.first();
+
+    if hunk.is_entire_file {
+        hunk_assignment.path_bytes == selected_hunk.path_bytes
+            && hunk_assignment.stack_id == selected_hunk.stack_id
+    } else {
+        hunk_assignment == selected_hunk && hunk_assignment.stack_id == selected_hunk.stack_id
+    }
 }

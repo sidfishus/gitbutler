@@ -1269,13 +1269,18 @@ fn render_debug(app: &App, area: Rect, frame: &mut Frame) {
 
     let details_selection = match &app.details {
         DetailOldOrNew::Old(details) => {
-            format!("{:#?}", details.selection())
+            format!("Selection: {:#?}", details.selection())
         }
         DetailOldOrNew::New(_) => String::new(),
     };
-    let details_selection = once(ListItem::new("Details selection").black().on_blue()).chain(
+    let details_num_threads = match &app.details {
+        DetailOldOrNew::Old(_) => "Threads: 0".to_string(),
+        DetailOldOrNew::New(details2) => format!("Threads: {}", details2.num_threads()),
+    };
+    let details_selection = once(ListItem::new("Details").black().on_blue()).chain(
         details_selection
             .lines()
+            .chain(details_num_threads.lines())
             .take(100)
             .map(|line| ListItem::new(line.to_owned())),
     );
