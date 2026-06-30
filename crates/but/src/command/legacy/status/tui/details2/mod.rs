@@ -221,6 +221,10 @@ impl Details2 {
                 let strings = self.strings.clone();
                 let theme = self.theme;
                 let ctx = ctx.to_sync();
+
+                // spawning a new thread immediately here without a pool is fine since, if the
+                // selection changes the previous will thread will end when it tries to send on
+                // the, now disconnected, channel
                 std::thread::spawn(move || {
                     let mut ctx = ctx.into_thread_local();
                     let mut id_gen = IdGen::new(strings);
