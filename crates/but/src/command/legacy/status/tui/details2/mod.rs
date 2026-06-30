@@ -8,6 +8,7 @@ use std::{
 use anyhow::Context as _;
 use bstr::{BString, ByteSlice as _};
 use but_ctx::{Context, OnDemand};
+use gix::utils::btoi::MinNumTraits;
 use itertools::{Itertools as _, Position};
 use ratatui::{
     Frame,
@@ -42,7 +43,8 @@ pub struct Details2 {
     syntax_set: DebugAsType<OnDemand<SyntaxSet>>,
     syntax_theme: DebugAsType<OnDemand<highlighting::Theme>>,
     strings: Strings,
-    selected_section: Option<SectionId>,
+    selected_section: Option<usize>,
+    sections: Vec<SectionId>,
 }
 
 #[derive(Debug, Default)]
@@ -62,6 +64,7 @@ impl Details2 {
             theme,
             selection: None,
             lines: Default::default(),
+            sections: Default::default(),
             syntax_set: OnDemand::new(|| Ok(SyntaxSet::load_defaults_newlines())).into(),
             syntax_theme: OnDemand::new(|| theme.load_syntax_highlighting_theme()).into(),
             strings: Default::default(),
@@ -260,6 +263,7 @@ impl Details2 {
                                     num_strings,
                                 );
                                 self.line_reader = ChannelLineReader::Finished;
+                                self.build_section_list();
                                 break Ok(true);
                             }
                         },
@@ -279,6 +283,8 @@ impl Details2 {
         let syntax_set = self.syntax_set.get().unwrap();
         let syntax_theme = self.syntax_theme.get().unwrap();
 
+        let selection_highlight = self.theme.discrete_selection_highlight.bg.unwrap();
+
         let mut areas = available_lines_in_area(area);
         'outer: for line in &self.lines {
             match line {
@@ -286,7 +292,12 @@ impl Details2 {
                     let Some(line_area) = areas.next() else {
                         break;
                     };
-                    frame.render_widget(line, line_area);
+
+                    if self.selected_section_eq(*id) {
+                        frame.render_widget(line.clone().bg(selection_highlight), line_area);
+                    } else {
+                        frame.render_widget(line, line_area);
+                    }
                 }
                 DetailsLine::TextToWrap { text, id } => {
                     for line in textwrap::wrap(text, textwrap::Options::new(area.width as usize))
@@ -300,7 +311,15 @@ impl Details2 {
                         let Some(line_area) = areas.next() else {
                             break 'outer;
                         };
-                        frame.render_widget(&*line, line_area);
+
+                        let line = if line.is_empty() { " " } else { &*line };
+
+                        if self.selected_section_eq(*id) {
+                            frame
+                                .render_widget(Line::from(line).bg(selection_highlight), line_area);
+                        } else {
+                            frame.render_widget(line, line_area);
+                        }
                     }
                 }
                 DetailsLine::Code(line) => {
@@ -317,7 +336,15 @@ impl Details2 {
                     let highlighted_line = highlighted_line
                         .as_ref()
                         .expect("ensure_highlighted was just called");
-                    frame.render_widget(highlighted_line, line_area);
+
+                    if self.selected_section_eq(id) {
+                        frame.render_widget(
+                            highlighted_line.clone().bg(selection_highlight),
+                            line_area,
+                        );
+                    } else {
+                        frame.render_widget(highlighted_line, line_area);
+                    }
                 }
                 DetailsLine::SectionSeparator => {
                     let Some(line_area) = areas.next() else {
@@ -337,13 +364,30 @@ impl Details2 {
         _viewport: Rect,
         _messages: &mut Vec<Message>,
     ) -> anyhow::Result<()> {
+        tracing::debug!(?msg);
+
         match msg {
             DetailsMessage::ScrollUp(_) => {}
             DetailsMessage::ScrollDown(_) => {}
-            DetailsMessage::SelectNextSection => {}
-            DetailsMessage::SelectPrevSection => {}
+            DetailsMessage::SelectNextSection => {
+                if let Some(n) = self.selected_section
+                    && self.sections.get(n + 1).is_some()
+                {
+                    self.selected_section = Some(n + 1);
+                }
+            }
+            DetailsMessage::SelectPrevSection => {
+                if let Some(n) = self.selected_section
+                    && let Some(m) = n.checked_sub(1)
+                    && self.sections.get(m).is_some()
+                {
+                    self.selected_section = Some(m);
+                }
+            }
             DetailsMessage::Deselect => {}
-            DetailsMessage::SelectFirstSection => {}
+            DetailsMessage::SelectFirstSection => {
+                self.selected_section = self.sections.first().map(|_| 0);
+            }
             DetailsMessage::CopyCurrentHunk => {}
             DetailsMessage::GotoTop => {}
             DetailsMessage::GotoBottom => {}
@@ -352,6 +396,32 @@ impl Details2 {
         }
 
         Ok(())
+    }
+
+    fn build_section_list(&mut self) {
+        self.sections.clear();
+        self.selected_section = None;
+
+        for line in &self.lines {
+            let id = match line {
+                DetailsLine::Text { id, .. } | DetailsLine::TextToWrap { id, .. } => *id,
+                DetailsLine::Code(line) => line.id,
+                DetailsLine::SectionSeparator => continue,
+            };
+
+            if let Some(last) = self.sections.last() {
+                if id != *last {
+                    self.sections.push(id);
+                }
+            } else {
+                self.sections.push(id);
+            }
+        }
+    }
+
+    fn selected_section_eq(&self, id: SectionId) -> bool {
+        self.selected_section
+            .is_some_and(|i| self.sections[i] == id)
     }
 }
 
