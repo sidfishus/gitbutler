@@ -149,8 +149,8 @@ impl Details2 {
                         let mut id_gen = IdGen::new(strings);
 
                         if let Err(err) = rendering::render_commit(
-                            &ctx,
                             commit,
+                            &ctx,
                             theme,
                             &mut id_gen,
                             &mut line_writer,

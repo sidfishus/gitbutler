@@ -20,8 +20,8 @@ use crate::{
 };
 
 pub fn render_commit(
-    ctx: &Context,
     commit: ObjectId,
+    ctx: &Context,
     theme: &'static Theme,
     id_gen: &mut IdGen<'_>,
     out: &mut impl LineWriter,
