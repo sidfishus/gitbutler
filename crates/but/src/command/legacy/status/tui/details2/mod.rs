@@ -309,18 +309,6 @@ trait LineWriter {
     }
 }
 
-#[derive(Default)]
-struct BufferLineWriter {
-    buf: Vec<DetailsLine>,
-}
-
-impl LineWriter for BufferLineWriter {
-    fn push(&mut self, line: DetailsLine) -> anyhow::Result<()> {
-        self.buf.push(line);
-        Ok(())
-    }
-}
-
 struct ChannelLineWriter {
     tx: std::sync::mpsc::SyncSender<DetailsLine>,
 }
