@@ -730,6 +730,10 @@ export class StackService {
 		});
 	}
 
+	get branchApply() {
+		return this.backendApi.endpoints.branchApply.mutate;
+	}
+
 	get createVirtualBranchFromBranch() {
 		return this.backendApi.endpoints.createVirtualBranchFromBranch.mutate;
 	}
