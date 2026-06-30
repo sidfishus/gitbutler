@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
-    command::legacy::status::tui::details2::{IdGen, LineWriter, SectionId},
+    command::legacy::status::tui::details2::{CodeLineNumbers, IdGen, LineWriter, SectionId, num_digits},
     theme::Theme,
 };
 
@@ -122,7 +122,6 @@ fn build_tree_changes(
                         hunk,
                         is_result_of_binary_to_text_conversion,
                         theme,
-                        &mut id_gen,
                         out,
                     )?;
 
@@ -262,7 +261,6 @@ fn build_unified_patch(
     hunk: DiffHunk,
     is_result_of_binary_to_text_conversion: bool,
     theme: &'static Theme,
-    id_gen: &mut IdGen<'_>,
     out: &mut impl LineWriter,
 ) -> anyhow::Result<()> {
     let DiffHunk {
@@ -310,8 +308,6 @@ fn build_unified_patch(
 
     let diff = Arc::new(diff);
 
-    let mut strings = id_gen.strings.lock();
-
     let mut first_line = true;
     let mut i = 0;
     for line in diff.lines_with_terminator() {
@@ -323,33 +319,13 @@ fn build_unified_patch(
         let (line_numbers, line_start_end, bg) = if let Some(rest) = line.strip_prefix(b"+") {
             let start = i + 1;
             let end = start + rest.len();
-            let line_numbers = [
-                Span::raw(strings.get_spaces(old_width as _)),
-                Span::styled(" ┊ ", theme.border),
-                Span::raw(
-                        strings
-                        .get_spaces((new_width - num_digits(new_line_num)) as _),
-                ),
-                Span::raw(strings.get_u32(new_line_num)).style(theme.addition),
-                Span::styled(" │ ", theme.border),
-                Span::raw("+").style(theme.addition_rich),
-            ];
+            let line_numbers = CodeLineNumbers::addition(old_width, new_width, new_line_num);
             new_line_num += 1;
             (line_numbers, (start, end), theme.addition_rich.bg)
         } else if let Some(rest) = line.strip_prefix(b"-") {
             let start = i + 1;
             let end = start + rest.len();
-            let line_numbers = [
-                Span::raw(
-                        strings
-                        .get_spaces((old_width - num_digits(old_line_num)) as _),
-                ),
-                Span::raw(strings.get_u32(old_line_num)).style(theme.deletion),
-                Span::styled(" ┊ ", theme.border),
-                Span::raw(strings.get_spaces(new_width as _)),
-                Span::styled(" │ ", theme.border),
-                Span::raw("-").style(theme.deletion_rich),
-            ];
+            let line_numbers = CodeLineNumbers::deletion(old_width, new_width, old_line_num);
             old_line_num += 1;
             (line_numbers, (start, end), theme.deletion_rich.bg)
         } else {
@@ -359,20 +335,8 @@ fn build_unified_patch(
             } else {
                 (i, i + line.len())
             };
-            let line_numbers = [
-                Span::raw(
-                        strings
-                        .get_spaces((old_width - num_digits(old_line_num)) as _),
-                ),
-                Span::styled(strings.get_u32(old_line_num), theme.hint),
-                Span::styled(" ┊ ", theme.border),
-                Span::raw(
-                        strings
-                        .get_spaces((new_width - num_digits(new_line_num)) as _),
-                ),
-                Span::styled(strings.get_u32(new_line_num), theme.hint),
-                Span::styled(" │  ", theme.border),
-            ];
+            let line_numbers =
+                CodeLineNumbers::context(old_width, new_width, old_line_num, new_line_num);
             old_line_num += 1;
             new_line_num += 1;
             (line_numbers, (start, end), None)
@@ -391,8 +355,4 @@ fn build_unified_patch(
     }
 
     Ok(())
-}
-
-fn num_digits(n: u32) -> u32 {
-    if n == 0 { 1 } else { n.ilog10() + 1 }
 }

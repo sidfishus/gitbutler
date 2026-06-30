@@ -144,39 +144,17 @@ impl Details2 {
                         let ctx = ctx.into_thread_local();
                         let mut id_gen = IdGen::new(strings);
 
-                        let info = allocation_counter::measure(|| {
-                            if let Err(err) = rendering::render_commit(
-                                &ctx,
-                                commit,
-                                theme,
-                                &mut id_gen,
-                                &mut line_writer,
-                            )
-                            .context("failed rendering commit diff")
-                                && err.downcast_ref::<SendErrorCode>().is_none()
-                            {
-                                tracing::error!("{err:#}");
-                            }
-                        });
-
+                        if let Err(err) = rendering::render_commit(
+                            &ctx,
+                            commit,
+                            theme,
+                            &mut id_gen,
+                            &mut line_writer,
+                        )
+                        .context("failed rendering commit diff")
+                            && err.downcast_ref::<SendErrorCode>().is_none()
                         {
-                            fn format_thousands_with_dots(number: u64) -> String {
-                                let digits = number.to_string();
-                                let separator_count = digits.len().saturating_sub(1) / 3;
-                                let mut formatted =
-                                    String::with_capacity(digits.len() + separator_count);
-                                for (index, digit) in digits.chars().enumerate() {
-                                    if index > 0 && (digits.len() - index).is_multiple_of(3) {
-                                        formatted.push('.');
-                                    }
-                                    formatted.push(digit);
-                                }
-                                formatted
-                            }
-                            tracing::debug!(
-                                "allocations: {}",
-                                format_thousands_with_dots(info.count_total)
-                            );
+                            tracing::error!("{err:#}");
                         }
                     });
                     Ok(true)
@@ -279,8 +257,10 @@ impl Details2 {
                         let line = line.strip_suffix('\n').unwrap_or(&line);
                         let line = line.strip_suffix('\r').unwrap_or(line);
 
+                        let mut strings = self.strings.lock();
+                        let line_numbers = line_numbers.spans(&mut strings, self.theme);
                         *highlighted_line.borrow_mut() =
-                            Some(Line::from_iter(line_numbers.clone().into_iter().chain(
+                            Some(Line::from_iter(line_numbers.into_iter().chain(
                                 syntax_highlight(line, *bg, &mut highlight_lines, &syntax_set),
                             )));
                     }
@@ -337,7 +317,7 @@ trait LineWriter {
     fn push_code(
         &mut self,
         id: SectionId,
-        line_numbers: [Span<'static>; 6],
+        line_numbers: CodeLineNumbers,
         line_start_end: (usize, usize),
         diff: Arc<BString>,
         bg: Option<Color>,
@@ -418,6 +398,79 @@ impl IdGen<'_> {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct SectionId(&'static str);
 
+#[derive(Debug, Copy, Clone)]
+struct CodeLineNumbers {
+    old_width: u32,
+    new_width: u32,
+    kind: CodeLineKind,
+}
+
+#[derive(Debug, Copy, Clone)]
+enum CodeLineKind {
+    Addition { new_line: u32 },
+    Deletion { old_line: u32 },
+    Context { old_line: u32, new_line: u32 },
+}
+
+impl CodeLineNumbers {
+    fn addition(old_width: u32, new_width: u32, new_line: u32) -> Self {
+        Self {
+            old_width,
+            new_width,
+            kind: CodeLineKind::Addition { new_line },
+        }
+    }
+
+    fn deletion(old_width: u32, new_width: u32, old_line: u32) -> Self {
+        Self {
+            old_width,
+            new_width,
+            kind: CodeLineKind::Deletion { old_line },
+        }
+    }
+
+    fn context(old_width: u32, new_width: u32, old_line: u32, new_line: u32) -> Self {
+        Self {
+            old_width,
+            new_width,
+            kind: CodeLineKind::Context { old_line, new_line },
+        }
+    }
+
+    fn spans(
+        self,
+        strings: &mut strings::SharedStrings,
+        theme: &'static Theme,
+    ) -> [Span<'static>; 6] {
+        match self.kind {
+            CodeLineKind::Addition { new_line } => [
+                Span::raw(strings.get_spaces(self.old_width as _)),
+                Span::styled(" ┊ ", theme.border),
+                Span::raw(strings.get_spaces((self.new_width - num_digits(new_line)) as _)),
+                Span::raw(strings.get_u32(new_line)).style(theme.addition),
+                Span::styled(" │ ", theme.border),
+                Span::raw("+").style(theme.addition_rich),
+            ],
+            CodeLineKind::Deletion { old_line } => [
+                Span::raw(strings.get_spaces((self.old_width - num_digits(old_line)) as _)),
+                Span::raw(strings.get_u32(old_line)).style(theme.deletion),
+                Span::styled(" ┊ ", theme.border),
+                Span::raw(strings.get_spaces(self.new_width as _)),
+                Span::styled(" │ ", theme.border),
+                Span::raw("-").style(theme.deletion_rich),
+            ],
+            CodeLineKind::Context { old_line, new_line } => [
+                Span::raw(strings.get_spaces((self.old_width - num_digits(old_line)) as _)),
+                Span::styled(strings.get_u32(old_line), theme.hint),
+                Span::styled(" ┊ ", theme.border),
+                Span::raw(strings.get_spaces((self.new_width - num_digits(new_line)) as _)),
+                Span::styled(strings.get_u32(new_line), theme.hint),
+                Span::styled(" │  ", theme.border),
+            ],
+        }
+    }
+}
+
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 enum DetailsLine {
@@ -431,7 +484,7 @@ enum DetailsLine {
     },
     Code {
         id: SectionId,
-        line_numbers: [Span<'static>; 6],
+        line_numbers: CodeLineNumbers,
         // indexes into `diff` where the line starts and ends, including any line terminators
         line_start_end: (usize, usize),
         // the whole diff this line is part of
@@ -472,4 +525,8 @@ fn syntax_highlight(
             }
         })
         .collect::<Vec<_>>()
+}
+
+fn num_digits(n: u32) -> u32 {
+    if n == 0 { 1 } else { n.ilog10() + 1 }
 }
