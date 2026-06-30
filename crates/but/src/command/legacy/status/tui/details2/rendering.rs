@@ -20,7 +20,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
-    CliId, IdMap,
+    IdMap,
     command::legacy::status::tui::details2::{
         CodeLineNumbers, IdGen, LineWriter, SectionId, num_digits,
     },

@@ -468,7 +468,6 @@ fn render_status_list_item_with_stack_highlight(
                 source,
                 how_to_combine_messages,
                 available_targets: _,
-                _unlock_details: _,
             }) => {
                 render_rub_inline_labels_for_selected_line(
                     app,
@@ -527,7 +526,6 @@ fn render_status_list_item_with_stack_highlight(
                 source,
                 how_to_combine_messages: _,
                 available_targets: _,
-                _unlock_details: _,
             }) => {
                 if let Some(cli_id) = data.cli_id()
                     && source.contains(cli_id)

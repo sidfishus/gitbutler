@@ -37,7 +37,6 @@ use crate::{
             help::HelpMessage,
             key_bind::{KeyBinds, fuzzy_picker_key_binds},
             marking::{Markable, Marks},
-            message_on_drop::MessageOnDrop,
             mode::{Mode, ModeDiscriminant},
             operations::stack_has_assigned_changes,
             toast::ToastKind,

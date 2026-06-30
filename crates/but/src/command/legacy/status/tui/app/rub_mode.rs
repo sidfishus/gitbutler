@@ -16,7 +16,6 @@ use crate::{
             tui::{
                 App, Message, ReloadCause, SelectAfterReload, cursor,
                 marking::{MarkClasses, Markable, Marks},
-                message_on_drop::MessageOnDrop,
                 mode::Mode,
                 nonempty_from_refs, operations,
             },
@@ -31,7 +30,6 @@ pub struct RubMode {
     pub source: RubSource,
     pub available_targets: Vec<Arc<CliId>>,
     pub how_to_combine_messages: MessageCombinationStrategy,
-    pub _unlock_details: Option<MessageOnDrop>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -63,10 +61,7 @@ impl RubSource {
 #[derive(Debug, Clone)]
 pub enum RubMessage {
     Start,
-    StartWithSource {
-        source: RubSource,
-        unlock_details: Option<MessageOnDrop>,
-    },
+    StartWithSource { source: RubSource },
     StartReverse,
     UseTargetMessage,
     UseSourceMessage,
@@ -82,11 +77,8 @@ impl App {
     ) -> anyhow::Result<()> {
         match rub_message {
             RubMessage::Start => self.handle_rub_start(),
-            RubMessage::StartWithSource {
-                source,
-                unlock_details,
-            } => {
-                self.handle_rub_start_with_source(source, unlock_details);
+            RubMessage::StartWithSource { source } => {
+                self.handle_rub_start_with_source(source);
             }
             RubMessage::StartReverse => {
                 self.handle_rub_start_reverse(ctx)?;
@@ -114,9 +106,9 @@ impl App {
             return;
         };
         if normal_mode.marks.is_empty() {
-            self.handle_rub_start_with_source(RubSource::CliId(Arc::clone(cli_id)), None);
+            self.handle_rub_start_with_source(RubSource::CliId(Arc::clone(cli_id)));
         } else {
-            self.handle_rub_start_with_source(RubSource::Marks(normal_mode.marks.clone()), None);
+            self.handle_rub_start_with_source(RubSource::Marks(normal_mode.marks.clone()));
         }
     }
 
@@ -174,11 +166,7 @@ impl App {
         }
     }
 
-    fn handle_rub_start_with_source(
-        &mut self,
-        source: RubSource,
-        unlock_details: Option<MessageOnDrop>,
-    ) {
+    fn handle_rub_start_with_source(&mut self, source: RubSource) {
         match &source {
             RubSource::CliId(cli_id) => {
                 if !supports_rubbing(cli_id) {
@@ -211,7 +199,6 @@ impl App {
                     source,
                     available_targets,
                     how_to_combine_messages: MessageCombinationStrategy::KeepBoth,
-                    _unlock_details: unlock_details,
                 });
             });
 
@@ -290,7 +277,6 @@ impl App {
                     source,
                     available_targets,
                     how_to_combine_messages: MessageCombinationStrategy::KeepBoth,
-                    _unlock_details: None,
                 });
             });
 
@@ -343,7 +329,6 @@ impl App {
             source,
             how_to_combine_messages,
             available_targets: _,
-            _unlock_details: _,
         }) = &*self.mode
         else {
             return Ok(());

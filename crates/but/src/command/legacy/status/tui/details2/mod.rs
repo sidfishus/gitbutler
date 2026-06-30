@@ -414,7 +414,6 @@ impl Details2 {
             DetailsMessage::GotoTop => {}
             DetailsMessage::GotoBottom => {}
             DetailsMessage::StartRub => {}
-            DetailsMessage::Unlock => {}
         }
 
         Ok(())
@@ -687,7 +686,7 @@ impl DetailsCodeLine {
             };
 
             // TODO: should this be cached?
-            let mut highlight_lines = HighlightLines::new(syntax, &syntax_theme);
+            let mut highlight_lines = HighlightLines::new(syntax, syntax_theme);
 
             let (start, end) = *line_start_end;
             let line = diff[start..end].to_str_lossy();
@@ -696,7 +695,7 @@ impl DetailsCodeLine {
 
             let line_numbers = line_numbers.spans(strings, theme);
             *highlighted_line.borrow_mut() = Some(Line::from_iter(line_numbers.into_iter().chain(
-                syntax_highlight(line, *bg, &mut highlight_lines, &syntax_set),
+                syntax_highlight(line, *bg, &mut highlight_lines, syntax_set),
             )));
         }
     }

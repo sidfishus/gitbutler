@@ -37,11 +37,10 @@ use crate::{
     CliId, IdMap,
     command::legacy::status::tui::{
         CommandMessage, CommitMessage, DebugAsType, DetailsLayoutMessage, FilesMessage, Message,
-        MessageOnDrop, MoveMessage,
+        MoveMessage,
         app::{CommittedHunk, RewordMessage, RubMessage},
         details::details_cursor::DetailsCursor,
         highlight,
-        message_on_drop::message_on_drop,
     },
     id::{UncommittedHunk, UncommittedHunkOrFile},
     theme::Theme,
@@ -63,7 +62,6 @@ pub enum DetailsMessage {
     GotoTop,
     GotoBottom,
     StartRub,
-    Unlock,
 }
 
 #[derive(Debug)]
@@ -75,7 +73,6 @@ pub struct Details {
     renderer: IncrementalDiffRenderer,
     syntax_set: DebugAsType<OnDemand<SyntaxSet>>,
     syntax_theme: DebugAsType<OnDemand<highlighting::Theme>>,
-    is_locked: bool,
     copied_hunk_highlight: highlight::Highlights<SectionId>,
     theme: &'static Theme,
 }
@@ -84,7 +81,6 @@ impl Details {
     pub fn new(theme: &'static Theme) -> Self {
         Self {
             is_dirty: false,
-            is_locked: false,
             widget: Default::default(),
             renderer: Default::default(),
             cursor: Default::default(),
@@ -109,19 +105,6 @@ impl Details {
         self.copied_hunk_highlight.update()
     }
 
-    fn lock(&mut self, messages: &mut Vec<Message>) -> MessageOnDrop {
-        self.is_locked = true;
-        message_on_drop(Message::Details(DetailsMessage::Unlock), messages)
-    }
-
-    pub fn unlock(&mut self) {
-        if !self.is_locked {
-            return;
-        }
-        self.is_locked = false;
-        self.mark_dirty();
-    }
-
     pub fn needs_update(&self, is_visible: bool) -> bool {
         is_visible && self.is_dirty()
     }
@@ -132,10 +115,6 @@ impl Details {
     }
 
     pub fn needs_update_after_message(&self, is_visible: bool, msg: &Message) -> bool {
-        if self.is_locked {
-            return false;
-        }
-
         if !is_visible {
             return false;
         }
@@ -216,8 +195,7 @@ impl Details {
                 MoveMessage::Confirm => true,
             },
             Message::Details(details_message) => match details_message {
-                DetailsMessage::Unlock // `unlock` sets the dirty flag if necessary
-                | DetailsMessage::Deselect
+                DetailsMessage::Deselect
                 | DetailsMessage::CopyCurrentHunk
                 | DetailsMessage::SelectFirstSection
                 | DetailsMessage::SelectNextSection
@@ -317,15 +295,7 @@ impl Details {
                     }
                 };
 
-                let unlock = self.lock(messages);
-
-                messages.extend([Message::Rub(RubMessage::StartWithSource {
-                    source,
-                    unlock_details: Some(unlock),
-                })]);
-            }
-            DetailsMessage::Unlock => {
-                self.unlock();
+                messages.extend([Message::Rub(RubMessage::StartWithSource { source })]);
             }
         }
 
