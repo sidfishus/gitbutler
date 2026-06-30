@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// A string interner that avoids allocating commonly used strings over and over.
 #[derive(Debug, Clone)]
 pub struct Strings {
     shared: Arc<Mutex<SharedStrings>>,

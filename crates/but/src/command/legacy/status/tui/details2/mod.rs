@@ -18,7 +18,11 @@ use syntect::{easy::HighlightLines, highlighting, parsing::SyntaxSet};
 
 use crate::{
     CliId,
-    command::legacy::status::tui::{Message, details::DetailsMessage, details2::strings::Strings},
+    command::legacy::status::tui::{
+        Message,
+        details::DetailsMessage,
+        details2::strings::{SharedStrings, Strings},
+    },
     theme::Theme,
     utils::DebugAsType,
 };
@@ -227,45 +231,19 @@ impl Details2 {
                 DetailsLine::TextToWrap { text, id } => {
                     frame.render_widget(&**text, line_area);
                 }
-                DetailsLine::Code {
-                    highlighted_line,
-                    line_numbers,
-                    line_start_end,
-                    diff,
-                    path,
-                    bg,
-                    id,
-                } => {
-                    if highlighted_line.borrow().is_none() {
-                        let syntax = {
-                            let path = path.to_path_lossy();
-                            path.extension()
-                                .and_then(|ext| syntax_set.find_syntax_by_extension(ext.to_str()?))
-                                .or_else(|| {
-                                    path.file_name().and_then(|file_name| {
-                                        syntax_set.find_syntax_by_extension(file_name.to_str()?)
-                                    })
-                                })
-                                .unwrap_or_else(|| syntax_set.find_syntax_plain_text())
-                        };
+                DetailsLine::Code(line) => {
+                    let id = line.id;
 
-                        // TODO: should this be cached?
-                        let mut highlight_lines = HighlightLines::new(syntax, &syntax_theme);
+                    let mut strings = self.strings.lock();
+                    line.ensure_highlighted(&syntax_set, &syntax_theme, self.theme, &mut strings);
 
-                        let (start, end) = *line_start_end;
-                        let line = diff[start..end].to_str_lossy();
-                        let line = line.strip_suffix('\n').unwrap_or(&line);
-                        let line = line.strip_suffix('\r').unwrap_or(line);
-
-                        let mut strings = self.strings.lock();
-                        let line_numbers = line_numbers.spans(&mut strings, self.theme);
-                        *highlighted_line.borrow_mut() =
-                            Some(Line::from_iter(line_numbers.into_iter().chain(
-                                syntax_highlight(line, *bg, &mut highlight_lines, &syntax_set),
-                            )));
-                    }
-
-                    frame.render_widget(highlighted_line.borrow().as_ref().unwrap(), line_area);
+                    frame.render_widget(
+                        line.highlighted_line
+                            .borrow()
+                            .as_ref()
+                            .expect("ensure_highlighted was just called"),
+                        line_area,
+                    );
                 }
                 DetailsLine::EmptyLine => {
                     frame.render_widget("", line_area);
@@ -323,7 +301,7 @@ trait LineWriter {
         bg: Option<Color>,
         path: Arc<BString>,
     ) -> anyhow::Result<()> {
-        self.push(DetailsLine::Code {
+        self.push(DetailsLine::Code(DetailsCodeLine {
             id,
             highlighted_line: RefCell::new(None),
             line_numbers,
@@ -331,7 +309,7 @@ trait LineWriter {
             diff,
             path,
             bg,
-        })
+        }))
     }
 }
 
@@ -474,31 +452,75 @@ impl CodeLineNumbers {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 enum DetailsLine {
-    Text {
-        id: SectionId,
-        line: Line<'static>,
-    },
-    TextToWrap {
-        id: SectionId,
-        text: String,
-    },
-    Code {
-        id: SectionId,
-        line_numbers: CodeLineNumbers,
-        // indexes into `diff` where the line starts and ends, including any line terminators
-        line_start_end: (usize, usize),
-        // the whole diff this line is part of
-        //
-        // we share the diff and store indexes to get the line to avoid allocating each line
-        diff: Arc<BString>,
-        path: Arc<BString>,
-        // HACK: only when drawing this line to the screen do we syntax highlight it and cache the
-        // result directly here. We dont have a mutable reference in `Details2::render` so have to
-        // cheat with a `RefCell`.
-        highlighted_line: RefCell<Option<Line<'static>>>,
-        bg: Option<Color>,
-    },
+    Text { id: SectionId, line: Line<'static> },
+    TextToWrap { id: SectionId, text: String },
+    Code(DetailsCodeLine),
     EmptyLine,
+}
+
+#[derive(Debug)]
+struct DetailsCodeLine {
+    id: SectionId,
+    line_numbers: CodeLineNumbers,
+    // indexes into `diff` where the line starts and ends, including any line terminators
+    line_start_end: (usize, usize),
+    // the whole diff this line is part of
+    //
+    // we share the diff and store indexes to get the line to avoid allocating each line
+    diff: Arc<BString>,
+    path: Arc<BString>,
+    // HACK: only when drawing this line to the screen do we syntax highlight it and cache the
+    // result directly here. We dont have a mutable reference in `Details2::render` so have to
+    // cheat with a `RefCell`.
+    highlighted_line: RefCell<Option<Line<'static>>>,
+    bg: Option<Color>,
+}
+
+impl DetailsCodeLine {
+    fn ensure_highlighted(
+        &self,
+        syntax_set: &SyntaxSet,
+        syntax_theme: &highlighting::Theme,
+        theme: &'static Theme,
+        strings: &mut SharedStrings,
+    ) {
+        let Self {
+            highlighted_line,
+            line_numbers,
+            line_start_end,
+            diff,
+            path,
+            bg,
+            id: _,
+        } = self;
+
+        if highlighted_line.borrow().is_none() {
+            let syntax = {
+                let path = path.to_path_lossy();
+                path.extension()
+                    .and_then(|ext| syntax_set.find_syntax_by_extension(ext.to_str()?))
+                    .or_else(|| {
+                        path.file_name().and_then(|file_name| {
+                            syntax_set.find_syntax_by_extension(file_name.to_str()?)
+                        })
+                    })
+                    .unwrap_or_else(|| syntax_set.find_syntax_plain_text())
+            };
+
+            // TODO: should this be cached?
+            let mut highlight_lines = HighlightLines::new(syntax, &syntax_theme);
+
+            let (start, end) = *line_start_end;
+            let line = diff[start..end].to_str_lossy();
+            let line = line.strip_suffix('\n').unwrap_or(&line);
+            let line = line.strip_suffix('\r').unwrap_or(line);
+
+            let line_numbers = line_numbers.spans(strings, theme);
+            *highlighted_line.borrow_mut() = Some(Line::from_iter(line_numbers.into_iter().chain(
+                syntax_highlight(line, *bg, &mut highlight_lines, &syntax_set),
+            )));
+        }
+    }
 }
 
 fn syntax_highlight(
