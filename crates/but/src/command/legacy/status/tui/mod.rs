@@ -265,7 +265,13 @@ where
                 Duration::from_millis(30)
             }
         }
-        app::DetailOldOrNew::New(_) => Duration::from_millis(30),
+        app::DetailOldOrNew::New(details2) => {
+            if details2.is_polling_thread() {
+                Duration::from_millis(0)
+            } else {
+                Duration::from_millis(30)
+            }
+        },
     };
     // poll terminal events
     for event in event_polling.poll(event_poll_timeout)? {

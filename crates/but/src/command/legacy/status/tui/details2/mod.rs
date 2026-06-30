@@ -72,6 +72,13 @@ impl Details2 {
         }
     }
 
+    pub fn is_polling_thread(&self) -> bool {
+        match &self.line_reader {
+            ChannelLineReader::NotStarted | ChannelLineReader::Finished => false,
+            ChannelLineReader::Started { .. } => true,
+        }
+    }
+
     pub fn update(
         &mut self,
         ctx: &mut Context,
@@ -163,8 +170,9 @@ impl Details2 {
                                 TryRecvError::Disconnected => {
                                     let num_strings = self.id_storage.lock().unwrap().len();
                                     tracing::debug!(
-                                        "finished reading from channel in {:?} ({} strings)",
+                                        "finished reading from channel in {:?} ({} lines, {} strings)",
                                         start.elapsed(),
+                                        self.lines.len(),
                                         num_strings,
                                     );
                                     self.line_reader = ChannelLineReader::Finished;
