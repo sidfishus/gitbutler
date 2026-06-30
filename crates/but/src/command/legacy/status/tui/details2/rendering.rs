@@ -122,6 +122,7 @@ fn build_tree_changes(
                         hunk,
                         is_result_of_binary_to_text_conversion,
                         theme,
+                        &mut id_gen,
                         out,
                     )?;
 
@@ -261,6 +262,7 @@ fn build_unified_patch(
     hunk: DiffHunk,
     is_result_of_binary_to_text_conversion: bool,
     theme: &'static Theme,
+    id_gen: &mut IdGen<'_>,
     out: &mut impl LineWriter,
 ) -> anyhow::Result<()> {
     let DiffHunk {
@@ -313,7 +315,7 @@ fn build_unified_patch(
                 Span::raw(" ".repeat(old_width as _)),
                 Span::styled(" ┊ ", theme.border),
                 Span::raw(" ".repeat((new_width - num_digits(new_line_num)) as _)),
-                Span::raw(new_line_num.to_string()).style(theme.addition),
+                Span::raw(id_gen.strings.get_u32(new_line_num)).style(theme.addition),
                 Span::styled(" │ ", theme.border),
                 Span::raw("+").style(theme.addition_rich),
             ]);
@@ -323,7 +325,7 @@ fn build_unified_patch(
             let code = rest.to_str_lossy().to_string();
             let line_numbers = Vec::from_iter([
                 Span::raw(" ".repeat((old_width - num_digits(old_line_num)) as _)),
-                Span::raw(old_line_num.to_string()).style(theme.deletion),
+                Span::raw(id_gen.strings.get_u32(old_line_num)).style(theme.deletion),
                 Span::styled(" ┊ ", theme.border),
                 Span::raw(" ".repeat(new_width as _)),
                 Span::styled(" │ ", theme.border),
@@ -336,10 +338,10 @@ fn build_unified_patch(
             let code = line.to_str_lossy().to_string();
             let line_numbers = Vec::from_iter([
                 Span::raw(" ".repeat((old_width - num_digits(old_line_num)) as _)),
-                Span::styled(old_line_num.to_string(), theme.hint),
+                Span::styled(id_gen.strings.get_u32(old_line_num), theme.hint),
                 Span::styled(" ┊ ", theme.border),
                 Span::raw(" ".repeat((new_width - num_digits(new_line_num)) as _)),
-                Span::styled(new_line_num.to_string(), theme.hint),
+                Span::styled(id_gen.strings.get_u32(new_line_num), theme.hint),
                 Span::styled(" │  ", theme.border),
             ]);
             old_line_num += 1;

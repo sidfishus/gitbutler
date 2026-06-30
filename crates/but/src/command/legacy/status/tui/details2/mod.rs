@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Display,
     sync::{Arc, Mutex, mpsc::TryRecvError},
     time::Instant,
@@ -36,7 +36,7 @@ pub struct Details2 {
     line_reader: ChannelLineReader,
     syntax_set: DebugAsType<OnDemand<SyntaxSet>>,
     syntax_theme: DebugAsType<OnDemand<highlighting::Theme>>,
-    id_storage: Arc<Mutex<HashSet<&'static str>>>,
+    strings: Strings,
     selected_section: Option<SectionId>,
 }
 
@@ -59,7 +59,7 @@ impl Details2 {
             lines: Default::default(),
             syntax_set: OnDemand::new(|| Ok(SyntaxSet::load_defaults_newlines())).into(),
             syntax_theme: OnDemand::new(|| theme.load_syntax_highlighting_theme()).into(),
-            id_storage: Default::default(),
+            strings: Default::default(),
             selected_section: Default::default(),
             line_reader: Default::default(),
         }
@@ -136,13 +136,13 @@ impl Details2 {
                         start: Instant::now(),
                     };
                     let mut line_writer = ChannelLineWriter { tx };
-                    let id_storage = Arc::clone(&self.id_storage);
+                    let strings = self.strings.clone();
                     let theme = self.theme;
                     let commit = *commit;
                     let ctx = ctx.to_sync();
                     std::thread::spawn(move || {
                         let ctx = ctx.into_thread_local();
-                        let mut id_gen = IdGen::new(id_storage);
+                        let mut id_gen = IdGen::new(strings);
 
                         let info = allocation_counter::measure(|| {
                             if let Err(err) = rendering::render_commit(
@@ -191,7 +191,7 @@ impl Details2 {
                             Err(err) => match err {
                                 TryRecvError::Empty => break Ok(false),
                                 TryRecvError::Disconnected => {
-                                    let num_strings = self.id_storage.lock().unwrap().len();
+                                    let num_strings = self.strings.len();
                                     tracing::debug!(
                                         "finished reading from channel in {:?} ({} lines, {} strings)",
                                         start.elapsed(),
@@ -377,36 +377,19 @@ impl Display for SendErrorCode {
 
 impl std::error::Error for SendErrorCode {}
 
-#[derive(Debug)]
-struct IdGen<'a> {
+#[derive(Debug, Default, Clone)]
+struct Strings {
     storage: Arc<Mutex<HashSet<&'static str>>>,
-    scope: &'static str,
-    _marker: std::marker::PhantomData<&'a mut ()>,
+    u32s: Arc<Mutex<HashMap<u32, &'static str>>>,
 }
 
-impl IdGen<'_> {
-    fn new(storage: Arc<Mutex<HashSet<&'static str>>>) -> Self {
-        IdGen {
-            storage,
-            scope: "details",
-            _marker: std::marker::PhantomData,
-        }
+impl Strings {
+    fn len(&self) -> usize {
+        let Self { storage, u32s } = self;
+        storage.lock().unwrap().len() + u32s.lock().unwrap().len()
     }
 
-    fn new_id(&mut self, id: impl Display) -> SectionId {
-        SectionId(self.get_or_alloc(format!("{}/{}", self.scope, id)))
-    }
-
-    fn scoped(&mut self, scope: impl Display) -> IdGen<'_> {
-        let scope = self.get_or_alloc(format!("{}/{}", self.scope, scope));
-        IdGen {
-            storage: Arc::clone(&self.storage),
-            scope,
-            _marker: std::marker::PhantomData,
-        }
-    }
-
-    fn get_or_alloc(&mut self, s: String) -> &'static str {
+    fn get(&self, s: String) -> &'static str {
         let mut storage = self.storage.lock().unwrap();
         if let Some(value) = storage.get(&*s) {
             return value;
@@ -414,6 +397,46 @@ impl IdGen<'_> {
         let static_s = s.leak();
         storage.insert(static_s);
         static_s
+    }
+
+    fn get_u32(&self, n: u32) -> &'static str {
+        let mut storage = self.u32s.lock().unwrap();
+        if let Some(value) = storage.get(&n) {
+            return value;
+        }
+        let static_s = n.to_string().leak();
+        storage.insert(n, static_s);
+        static_s
+    }
+}
+
+#[derive(Debug)]
+struct IdGen<'a> {
+    pub strings: Strings,
+    scope: &'static str,
+    _marker: std::marker::PhantomData<&'a mut ()>,
+}
+
+impl IdGen<'_> {
+    fn new(strings: Strings) -> Self {
+        IdGen {
+            strings,
+            scope: "details",
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    fn new_id(&mut self, id: impl Display) -> SectionId {
+        SectionId(self.strings.get(format!("{}/{}", self.scope, id)))
+    }
+
+    fn scoped(&mut self, scope: impl Display) -> IdGen<'_> {
+        let scope = self.strings.get(format!("{}/{}", self.scope, scope));
+        IdGen {
+            strings: self.strings.clone(),
+            scope,
+            _marker: std::marker::PhantomData,
+        }
     }
 }
 
