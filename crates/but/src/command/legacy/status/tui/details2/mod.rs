@@ -279,7 +279,7 @@ impl Details2 {
         }
     }
 
-    pub fn render(&self, _help_shown: bool, _has_focus: bool, area: Rect, frame: &mut Frame) {
+    pub fn render(&self, _help_shown: bool, tui_has_focus: bool, area: Rect, frame: &mut Frame) {
         let syntax_set = self.syntax_set.get().unwrap();
         let syntax_theme = self.syntax_theme.get().unwrap();
 
@@ -293,7 +293,7 @@ impl Details2 {
                         break;
                     };
 
-                    if self.selected_section_eq(*id) {
+                    if self.should_highlight_section(*id, tui_has_focus) {
                         frame.render_widget(line.clone().bg(selection_highlight), line_area);
                     } else {
                         frame.render_widget(line, line_area);
@@ -314,7 +314,7 @@ impl Details2 {
 
                         let line = if line.is_empty() { " " } else { &*line };
 
-                        if self.selected_section_eq(*id) {
+                        if self.should_highlight_section(*id, tui_has_focus) {
                             frame
                                 .render_widget(Line::from(line).bg(selection_highlight), line_area);
                         } else {
@@ -337,7 +337,7 @@ impl Details2 {
                         .as_ref()
                         .expect("ensure_highlighted was just called");
 
-                    if self.selected_section_eq(id) {
+                    if self.should_highlight_section(id, tui_has_focus) {
                         frame.render_widget(
                             highlighted_line.clone().bg(selection_highlight),
                             line_area,
@@ -419,7 +419,10 @@ impl Details2 {
         }
     }
 
-    fn selected_section_eq(&self, id: SectionId) -> bool {
+    fn should_highlight_section(&self, id: SectionId, tui_has_focus: bool) -> bool {
+        if !tui_has_focus {
+            return false;
+        }
         self.selected_section
             .is_some_and(|i| self.sections[i] == id)
     }
