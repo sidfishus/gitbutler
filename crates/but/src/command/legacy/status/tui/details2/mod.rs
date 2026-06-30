@@ -1,5 +1,12 @@
-use std::{cell::RefCell, collections::HashSet, fmt::Display, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::HashSet,
+    fmt::Display,
+    sync::{Arc, mpsc::TryRecvError},
+    time::Instant,
+};
 
+use anyhow::Context as _;
 use bstr::{BString, ByteSlice as _};
 use but_ctx::{Context, OnDemand};
 use ratatui::{
@@ -23,11 +30,23 @@ mod rendering;
 pub struct Details2 {
     theme: &'static Theme,
     selection: Option<CliId>,
-    lines: Option<Vec<DetailsLine>>,
+    lines: Vec<DetailsLine>,
+    line_reader: ChannelLineReader,
     syntax_set: DebugAsType<OnDemand<SyntaxSet>>,
     syntax_theme: DebugAsType<OnDemand<highlighting::Theme>>,
     id_storage: HashSet<&'static str>,
     selected_section: Option<SectionId>,
+}
+
+#[derive(Debug, Default)]
+enum ChannelLineReader {
+    #[default]
+    NotStarted,
+    Started {
+        rx: std::sync::mpsc::Receiver<DetailsLine>,
+        start: Instant,
+    },
+    Finished,
 }
 
 impl Details2 {
@@ -40,68 +59,126 @@ impl Details2 {
             syntax_theme: OnDemand::new(|| theme.load_syntax_highlighting_theme()).into(),
             id_storage: Default::default(),
             selected_section: Default::default(),
+            line_reader: Default::default(),
         }
     }
 
-    pub fn update(&mut self, ctx: &mut Context, selection: Option<&CliId>) -> anyhow::Result<bool> {
-        let selection = match (self.selection.as_ref(), selection) {
+    pub fn update(
+        &mut self,
+        ctx: &mut Context,
+        new_selection: Option<&CliId>,
+    ) -> anyhow::Result<bool> {
+        let selection = match (self.selection.as_ref(), new_selection) {
             (None, None) => {
+                // no selection
+                self.lines.clear();
+                self.line_reader = Default::default();
+
                 return Ok(false);
             }
             (None, Some(new)) => {
+                // selected something
                 self.selection = Some(new.clone());
+
+                self.lines.clear();
+                self.line_reader = Default::default();
+
                 new
             }
             (Some(_), None) => {
-                return Ok(false);
+                // deselected
+                self.selection = None;
+                self.lines.clear();
+                self.line_reader = Default::default();
+
+                return Ok(true);
             }
             (Some(old), Some(new)) => {
                 if old == new {
-                    return Ok(false);
+                    // selection didn't change
+                    // we might have to poll the channel so dont return
+                    old
                 } else {
+                    // selected something new
                     self.selection = Some(new.clone());
+                    self.lines.clear();
+                    self.line_reader = Default::default();
                     new
                 }
             }
         };
 
-        tracing::info!("update");
-
         match selection {
             CliId::Commit {
                 commit_id: commit, ..
-            } => {
-                let mut id_gen = IdGen {
-                    storage: &mut self.id_storage,
-                    scope: "details",
-                };
-                let mut out = BufferLineWriter::default();
-                rendering::render_commit(ctx, *commit, self.theme, &mut id_gen, &mut out)?;
-                self.lines = Some(out.buf);
-            }
+            } => match &mut self.line_reader {
+                ChannelLineReader::NotStarted => {
+                    tracing::info!("spawning thread");
+                    let (tx, rx) = std::sync::mpsc::sync_channel(1024);
+                    self.line_reader = ChannelLineReader::Started {
+                        rx,
+                        start: Instant::now(),
+                    };
+                    let mut line_writer = ChannelLineWriter { tx };
+                    let mut id_storage = self.id_storage.clone();
+                    let theme = self.theme;
+                    let commit = *commit;
+                    let ctx = ctx.to_sync();
+                    std::thread::spawn(move || {
+                        let ctx = ctx.into_thread_local();
+                        let mut id_gen = IdGen {
+                            storage: &mut id_storage,
+                            scope: "details",
+                        };
+                        rendering::render_commit(
+                            &ctx,
+                            commit,
+                            theme,
+                            &mut id_gen,
+                            &mut line_writer,
+                        )
+                        .context("failed rendering commit diff")
+                        .unwrap();
+                    });
+                    Ok(true)
+                }
+                ChannelLineReader::Started { rx, start } => match rx.try_recv() {
+                    Ok(line) => {
+                        tracing::info!("read line from channel");
+                        self.lines.push(line);
+                        Ok(true)
+                    }
+                    Err(err) => match err {
+                        TryRecvError::Empty => Ok(false),
+                        TryRecvError::Disconnected => {
+                            tracing::info!(
+                                "finished reading from channel in {:?}",
+                                start.elapsed()
+                            );
+                            self.line_reader = ChannelLineReader::Finished;
+                            Ok(true)
+                        }
+                    },
+                },
+                ChannelLineReader::Finished => Ok(false),
+            },
             CliId::UncommittedHunkOrFile(..)
             | CliId::PathPrefix { .. }
             | CliId::CommittedFile { .. }
             | CliId::Branch { .. }
             | CliId::Uncommitted { .. }
             | CliId::Stack { .. } => {
-                self.lines = None;
+                self.lines.clear();
+                Ok(true)
             }
-        };
-
-        Ok(true)
+        }
     }
 
     pub fn render(&self, _help_shown: bool, _has_focus: bool, area: Rect, frame: &mut Frame) {
         let syntax_set = self.syntax_set.get().unwrap();
         let syntax_theme = self.syntax_theme.get().unwrap();
 
-        let Some(lines) = &self.lines else {
-            frame.render_widget("", area);
-            return;
-        };
-
-        for (n, line) in lines.iter().enumerate() {
+        for (n, line) in self.lines.iter().enumerate() {
             let n = n as u16;
 
             if n >= area.height {
@@ -190,7 +267,6 @@ trait LineWriter {
     fn push(&mut self, line: DetailsLine);
 
     fn push_text(&mut self, id: SectionId, line: Line<'static>) {
-        tracing::info!(?id);
         self.push(DetailsLine::Text { id, line });
     }
 
@@ -199,7 +275,6 @@ trait LineWriter {
     }
 
     fn push_text_to_wrap(&mut self, id: SectionId, text: String) {
-        tracing::info!(?id);
         self.push(DetailsLine::TextToWrap { id, text });
     }
 
@@ -211,7 +286,6 @@ trait LineWriter {
         bg: Option<Color>,
         path: Arc<BString>,
     ) {
-        tracing::info!(?id);
         self.push(DetailsLine::RawCode {
             id,
             highlighted_line: RefCell::new(None),
@@ -240,7 +314,10 @@ struct ChannelLineWriter {
 
 impl LineWriter for ChannelLineWriter {
     fn push(&mut self, line: DetailsLine) {
-        _ = self.tx.send(line);
+        // std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // TODO(david): abort if rx is gone
+        self.tx.send(line);
     }
 }
 
