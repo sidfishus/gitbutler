@@ -8,6 +8,7 @@ use std::{
 use anyhow::Context as _;
 use bstr::{BString, ByteSlice as _};
 use but_ctx::{Context, OnDemand};
+use itertools::{Itertools as _, Position};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -278,30 +279,35 @@ impl Details2 {
         let syntax_set = self.syntax_set.get().unwrap();
         let syntax_theme = self.syntax_theme.get().unwrap();
 
-        let test_bg = Color::from_hsl(ratatui::palette::Hsl::new(236.8, 0.162, 0.229));
-
-        for (n, line) in self.lines.iter().enumerate() {
-            let n = n as u16;
-
-            if n >= area.height {
-                break;
-            }
-            let y = area.y + n;
-            let line_area = Rect {
-                x: area.x,
-                y,
-                width: area.width,
-                height: 1,
-            };
-
+        let mut areas = available_lines_in_area(area);
+        'outer: for line in &self.lines {
             match line {
                 DetailsLine::Text { line, id } => {
-                    frame.render_widget(line.clone().bg(test_bg), line_area);
+                    let Some(line_area) = areas.next() else {
+                        break;
+                    };
+                    frame.render_widget(line, line_area);
                 }
                 DetailsLine::TextToWrap { text, id } => {
-                    frame.render_widget(text.clone().bg(test_bg), line_area);
+                    for line in textwrap::wrap(text, textwrap::Options::new(area.width as usize))
+                        .into_iter()
+                        .with_position()
+                        .filter_map(|(pos, line)| match pos {
+                            Position::First | Position::Middle | Position::Only => Some(line),
+                            Position::Last => (!line.is_empty()).then_some(line),
+                        })
+                    {
+                        let Some(line_area) = areas.next() else {
+                            break 'outer;
+                        };
+                        frame.render_widget(&*line, line_area);
+                    }
                 }
                 DetailsLine::Code(line) => {
+                    let Some(line_area) = areas.next() else {
+                        break;
+                    };
+
                     let id = line.id;
 
                     let mut strings = self.strings.lock();
@@ -311,9 +317,13 @@ impl Details2 {
                     let highlighted_line = highlighted_line
                         .as_ref()
                         .expect("ensure_highlighted was just called");
-                    frame.render_widget(highlighted_line.clone().bg(test_bg), line_area);
+                    frame.render_widget(highlighted_line, line_area);
                 }
                 DetailsLine::SectionSeparator => {
+                    let Some(line_area) = areas.next() else {
+                        break;
+                    };
+
                     frame.render_widget("", line_area);
                 }
             }
@@ -625,6 +635,7 @@ fn num_digits(n: u32) -> u32 {
     if n == 0 { 1 } else { n.ilog10() + 1 }
 }
 
+/// Counter for tracking how many threads we're currently running.
 static NUM_THREADS: AtomicUsize = AtomicUsize::new(0);
 
 struct NumThreadsGuard;
@@ -640,4 +651,16 @@ impl Drop for NumThreadsGuard {
     fn drop(&mut self) {
         NUM_THREADS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+fn available_lines_in_area(area: Rect) -> impl Iterator<Item = Rect> {
+    (0..area.height).map(move |i| {
+        let y = area.y + i;
+        Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: 1,
+        }
+    })
 }
