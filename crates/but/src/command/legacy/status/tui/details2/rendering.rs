@@ -1,5 +1,4 @@
 use std::{
-    cell::RefCell,
     iter::{once, repeat_n},
     sync::Arc,
 };
@@ -12,81 +11,56 @@ use but_core::{
 };
 use but_ctx::Context;
 use gix::{ObjectId, actor::Signature};
-use ratatui::{
-    style::Color,
-    text::{Line, Span},
-};
+use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
-    command::legacy::status::tui::details2::{DetailsLine, LineWriter},
+    command::legacy::status::tui::details2::{IdGen, LineWriter, SectionId},
     theme::Theme,
 };
-
-#[derive(Default)]
-pub struct LineBuffer {
-    pub buf: Vec<DetailsLine>,
-}
-
-impl LineWriter for LineBuffer {
-    fn push_text(&mut self, line: Line<'static>) {
-        self.buf.push(DetailsLine::Text { line });
-    }
-
-    fn push_text_to_wrap(&mut self, text: String) {
-        self.buf.push(DetailsLine::TextToWrap { text });
-    }
-
-    fn push_raw_code(
-        &mut self,
-        line_numbers: Vec<Span<'static>>,
-        code: String,
-        bg: Option<Color>,
-        path: Arc<BString>,
-    ) {
-        self.buf.push(DetailsLine::RawCode {
-            highlighted_line: RefCell::new(None),
-            line_numbers,
-            code,
-            path,
-            bg,
-        });
-    }
-}
 
 pub fn render_commit(
     ctx: &Context,
     commit: ObjectId,
     theme: &'static Theme,
+    id_gen: &mut IdGen<'_>,
     out: &mut dyn LineWriter,
 ) -> anyhow::Result<()> {
     let commit_details =
         but_api::diff::commit_details(ctx, commit, but_api::diff::ComputeLineStats::No)?;
 
-    out.push_text(Line::from_iter([
-        Span::raw(format!("{:<11}", "Commit ID:")),
-        Span::styled(commit.to_hex().to_string(), theme.commit_id),
-    ]));
+    let mut id_gen = id_gen.scoped(commit);
 
-    out.push_text(Line::from_iter(
-        once(Span::raw(format!("{:<11}", "Author:")))
-            .chain(render_signature(&commit_details.commit.author, theme)),
-    ));
+    let commit_header_id = id_gen.new_id("header");
+    out.push_text(
+        commit_header_id,
+        Line::from_iter([
+            Span::raw(format!("{:<11}", "Commit ID:")),
+            Span::styled(commit.to_hex().to_string(), theme.commit_id),
+        ]),
+    );
+    out.push_text(
+        commit_header_id,
+        Line::from_iter(
+            once(Span::raw(format!("{:<11}", "Author:")))
+                .chain(render_signature(&commit_details.commit.author, theme)),
+        ),
+    );
+    out.push_text(
+        commit_header_id,
+        Line::from_iter(
+            once(Span::raw(format!("{:<11}", "Committer:")))
+                .chain(render_signature(&commit_details.commit.committer, theme)),
+        ),
+    );
 
-    out.push_text(Line::from_iter(
-        once(Span::raw(format!("{:<11}", "Committer:")))
-            .chain(render_signature(&commit_details.commit.committer, theme)),
-    ));
+    out.push_empty_line();
 
-    // out.push_end_of_section();
-
-    out.push_text("".into());
-
+    let message_id = id_gen.new_id("message");
     let message = commit_details.commit.message.to_string();
     if !message.is_empty() {
-        out.push_text_to_wrap(message);
-        // out.push_end_of_section();
-        out.push_text("".into());
+        out.push_text_to_wrap(message_id, message);
+        out.push_empty_line();
     }
 
     let tree_changes = commit_details
@@ -95,7 +69,7 @@ pub fn render_commit(
         .map(|change| TreeChange::from(change.clone()))
         .collect::<Vec<_>>();
 
-    build_tree_changes(ctx, &tree_changes, theme, out);
+    build_tree_changes(ctx, &tree_changes, theme, &mut id_gen, out);
 
     Ok(())
 }
@@ -104,70 +78,88 @@ fn build_tree_changes(
     ctx: &Context,
     tree_changes: &[TreeChange],
     theme: &'static Theme,
+    id_gen: &mut IdGen<'_>,
     out: &mut dyn LineWriter,
 ) {
-    for tree_change in tree_changes {
+    let mut id_gen = id_gen.scoped("tree_changes");
+
+    for (i, tree_change) in tree_changes.iter().enumerate() {
+        let mut id_gen = id_gen.scoped(i);
+
         let path = Arc::new(tree_change.path_bytes.clone());
-        if let Some(patch) = but_api::diff::tree_change_diffs(ctx, tree_change.clone())
+        let Some(patch) = but_api::diff::tree_change_diffs(ctx, tree_change.clone())
             .ok()
             .flatten()
-        {
-            match patch {
-                UnifiedPatch::Patch {
-                    hunks,
-                    is_result_of_binary_to_text_conversion,
-                    lines_added: _,
-                    lines_removed: _,
-                } => {
-                    let mut first_hunk = true;
-                    for diff_hunk in hunks {
-                        if std::mem::take(&mut first_hunk) {
-                            render_hunk_path_header(
-                                tree_change.path.as_ref(),
-                                Some(ShortIdOrTreeStatus::TreeStatus(&tree_change.status)),
-                                out,
-                                theme,
-                            );
-                        }
+        else {
+            continue;
+        };
 
-                        build_unified_patch(
-                            &path,
-                            diff_hunk,
-                            is_result_of_binary_to_text_conversion,
-                            theme,
+        match patch {
+            UnifiedPatch::Patch {
+                hunks,
+                is_result_of_binary_to_text_conversion,
+                lines_added: _,
+                lines_removed: _,
+            } => {
+                let mut first_hunk = true;
+                let mut id_gen = id_gen.scoped("hunks");
+                for (j, hunk) in hunks.into_iter().enumerate() {
+                    let hunk_id = id_gen.new_id(j);
+
+                    if std::mem::take(&mut first_hunk) {
+                        render_hunk_path_header(
+                            hunk_id,
+                            tree_change.path.as_ref(),
+                            Some(ShortIdOrTreeStatus::TreeStatus(&tree_change.status)),
                             out,
+                            theme,
                         );
-
-                        // out.push_end_of_section();
                     }
-                }
-                UnifiedPatch::Binary => {
-                    render_hunk_path_header(
-                        tree_change.path.as_ref(),
-                        Some(ShortIdOrTreeStatus::TreeStatus(&tree_change.status)),
-                        out,
+
+                    build_unified_patch(
+                        hunk_id,
+                        &path,
+                        hunk,
+                        is_result_of_binary_to_text_conversion,
                         theme,
-                    );
-
-                    out.push_text("Binary file - no diff available".into());
-
-                    // out.push_end_of_section();
-                }
-                UnifiedPatch::TooLarge { size_in_bytes } => {
-                    render_hunk_path_header(
-                        tree_change.path.as_ref(),
-                        Some(ShortIdOrTreeStatus::TreeStatus(&tree_change.status)),
                         out,
-                        theme,
                     );
 
-                    out.push_text(
-                        format!("File too large ({size_in_bytes} bytes) - no diff available")
-                            .into(),
-                    );
-
-                    // out.push_end_of_section();
+                    out.push_empty_line();
                 }
+            }
+            UnifiedPatch::Binary => {
+                let patch_id = id_gen.new_id("binary");
+
+                render_hunk_path_header(
+                    patch_id,
+                    tree_change.path.as_ref(),
+                    Some(ShortIdOrTreeStatus::TreeStatus(&tree_change.status)),
+                    out,
+                    theme,
+                );
+
+                out.push_text(patch_id, "Binary file - no diff available".into());
+
+                out.push_empty_line();
+            }
+            UnifiedPatch::TooLarge { size_in_bytes } => {
+                let patch_id = id_gen.new_id("too_large");
+
+                render_hunk_path_header(
+                    patch_id,
+                    tree_change.path.as_ref(),
+                    Some(ShortIdOrTreeStatus::TreeStatus(&tree_change.status)),
+                    out,
+                    theme,
+                );
+
+                out.push_text(
+                    patch_id,
+                    format!("File too large ({size_in_bytes} bytes) - no diff available").into(),
+                );
+
+                out.push_empty_line();
             }
         }
     }
@@ -199,6 +191,7 @@ enum ShortIdOrTreeStatus<'a> {
 }
 
 fn render_hunk_path_header(
+    id: SectionId,
     path: &BStr,
     status: Option<ShortIdOrTreeStatus<'_>>,
     out: &mut dyn LineWriter,
@@ -219,8 +212,8 @@ fn render_hunk_path_header(
             )
             .chain([Span::raw(path)]),
     );
-    bordered_line_top_right_bottom(path_line, out, theme);
-    out.push_text("".into());
+    bordered_line_top_right_bottom(id, path_line, out, theme);
+    out.push_text(id, "".into());
 }
 
 fn change_status(status: &TreeStatus, theme: &'static Theme) -> Span<'static> {
@@ -233,6 +226,7 @@ fn change_status(status: &TreeStatus, theme: &'static Theme) -> Span<'static> {
 }
 
 fn bordered_line_top_right_bottom(
+    id: SectionId,
     mut text: Line<'static>,
     out: &mut dyn LineWriter,
     theme: &'static Theme,
@@ -240,21 +234,24 @@ fn bordered_line_top_right_bottom(
     let width_including_padding = text.width() + 1;
 
     out.push_text(
+        id,
         Line::from_iter(repeat_n("─", width_including_padding).chain(once("╮")))
             .style(theme.border),
     );
 
     text.spans
         .extend([Span::raw(" "), Span::styled("│", theme.border)]);
-    out.push_text(text);
+    out.push_text(id, text);
 
     out.push_text(
+        id,
         Line::from_iter(repeat_n("─", width_including_padding).chain(once("╯")))
             .style(theme.border),
     );
 }
 
 fn build_unified_patch(
+    id: SectionId,
     path: &Arc<BString>,
     hunk: DiffHunk,
     is_result_of_binary_to_text_conversion: bool,
@@ -270,13 +267,17 @@ fn build_unified_patch(
     } = hunk;
 
     if is_result_of_binary_to_text_conversion {
-        out.push_text("(diff generated from binary-to-text conversion)".into());
+        out.push_text(id, "(diff generated from binary-to-text conversion)".into());
     }
 
     if let Some(headers) = diff.lines().next() {
-        out.push_text(Span::styled(headers.to_str_lossy().to_string(), theme.hint).into());
+        out.push_text(
+            id,
+            Span::styled(headers.to_str_lossy().to_string(), theme.hint).into(),
+        );
 
         out.push_text(
+            id,
             Line::from_iter(repeat_n("─", headers.to_str_lossy().width())).style(theme.border),
         );
     }
@@ -341,7 +342,7 @@ fn build_unified_patch(
             (line_numbers, code, None)
         };
 
-        out.push_raw_code(line_numbers, code, bg, Arc::clone(path));
+        out.push_raw_code(id, line_numbers, code, bg, Arc::clone(path));
     }
 }
 

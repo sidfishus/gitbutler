@@ -1,4 +1,4 @@
-use std::{cell::RefCell, sync::Arc};
+use std::{cell::RefCell, collections::HashSet, fmt::Display, sync::Arc};
 
 use bstr::{BString, ByteSlice as _};
 use but_ctx::{Context, OnDemand};
@@ -12,9 +12,7 @@ use syntect::{easy::HighlightLines, highlighting, parsing::SyntaxSet};
 
 use crate::{
     CliId,
-    command::legacy::status::tui::{
-        Message, details::DetailsMessage, details2::rendering::LineBuffer,
-    },
+    command::legacy::status::tui::{Message, details::DetailsMessage},
     theme::Theme,
     utils::DebugAsType,
 };
@@ -28,6 +26,8 @@ pub struct Details2 {
     lines: Option<Vec<DetailsLine>>,
     syntax_set: DebugAsType<OnDemand<SyntaxSet>>,
     syntax_theme: DebugAsType<OnDemand<highlighting::Theme>>,
+    id_storage: HashSet<&'static str>,
+    selected_section: Option<SectionId>,
 }
 
 impl Details2 {
@@ -38,6 +38,8 @@ impl Details2 {
             lines: Default::default(),
             syntax_set: OnDemand::new(|| Ok(SyntaxSet::load_defaults_newlines())).into(),
             syntax_theme: OnDemand::new(|| theme.load_syntax_highlighting_theme()).into(),
+            id_storage: Default::default(),
+            selected_section: Default::default(),
         }
     }
 
@@ -69,8 +71,12 @@ impl Details2 {
             CliId::Commit {
                 commit_id: commit, ..
             } => {
-                let mut out = LineBuffer::default();
-                rendering::render_commit(ctx, *commit, self.theme, &mut out)?;
+                let mut id_gen = IdGen {
+                    storage: &mut self.id_storage,
+                    scope: "details",
+                };
+                let mut out = BufferLineWriter::default();
+                rendering::render_commit(ctx, *commit, self.theme, &mut id_gen, &mut out)?;
                 self.lines = Some(out.buf);
             }
             CliId::UncommittedHunkOrFile(..)
@@ -110,10 +116,10 @@ impl Details2 {
             };
 
             match line {
-                DetailsLine::Text { line } => {
+                DetailsLine::Text { line, id } => {
                     frame.render_widget(line, line_area);
                 }
-                DetailsLine::TextToWrap { text } => {
+                DetailsLine::TextToWrap { text, id } => {
                     frame.render_widget(&**text, line_area);
                 }
                 DetailsLine::RawCode {
@@ -122,6 +128,7 @@ impl Details2 {
                     code,
                     path,
                     bg,
+                    id,
                 } => {
                     if highlighted_line.borrow().is_none() {
                         let syntax = {
@@ -146,6 +153,9 @@ impl Details2 {
                     }
 
                     frame.render_widget(highlighted_line.borrow().as_ref().unwrap(), line_area);
+                }
+                DetailsLine::EmptyLine => {
+                    frame.render_widget("", line_area);
                 }
             }
         }
@@ -177,12 +187,15 @@ impl Details2 {
 }
 
 trait LineWriter {
-    fn push_text(&mut self, line: Line<'static>);
+    fn push_text(&mut self, id: SectionId, line: Line<'static>);
 
-    fn push_text_to_wrap(&mut self, text: String);
+    fn push_empty_line(&mut self);
+
+    fn push_text_to_wrap(&mut self, id: SectionId, text: String);
 
     fn push_raw_code(
         &mut self,
+        id: SectionId,
         line_numbers: Vec<Span<'static>>,
         code: String,
         bg: Option<Color>,
@@ -190,21 +203,100 @@ trait LineWriter {
     );
 }
 
+#[derive(Default)]
+struct BufferLineWriter {
+    buf: Vec<DetailsLine>,
+}
+
+impl LineWriter for BufferLineWriter {
+    fn push_text(&mut self, id: SectionId, line: Line<'static>) {
+        tracing::info!(?id);
+        self.buf.push(DetailsLine::Text { id, line });
+    }
+
+    fn push_empty_line(&mut self) {
+        self.buf.push(DetailsLine::EmptyLine);
+    }
+
+    fn push_text_to_wrap(&mut self, id: SectionId, text: String) {
+        tracing::info!(?id);
+        self.buf.push(DetailsLine::TextToWrap { id, text });
+    }
+
+    fn push_raw_code(
+        &mut self,
+        id: SectionId,
+        line_numbers: Vec<Span<'static>>,
+        code: String,
+        bg: Option<Color>,
+        path: Arc<BString>,
+    ) {
+        tracing::info!(?id);
+        self.buf.push(DetailsLine::RawCode {
+            id,
+            highlighted_line: RefCell::new(None),
+            line_numbers,
+            code,
+            path,
+            bg,
+        });
+    }
+}
+
+#[derive(Debug)]
+struct IdGen<'a> {
+    storage: &'a mut HashSet<&'static str>,
+    scope: &'static str,
+}
+
+impl IdGen<'_> {
+    fn new_id(&mut self, id: impl Display) -> SectionId {
+        SectionId(self.get_or_alloc(format!("{}/{}", self.scope, id)))
+    }
+
+    fn scoped(&mut self, scope: impl Display) -> IdGen<'_> {
+        let scope = self.get_or_alloc(format!("{}/{}", self.scope, scope));
+        IdGen {
+            storage: self.storage,
+            scope,
+        }
+    }
+
+    fn get_or_alloc(&mut self, s: String) -> &'static str {
+        if let Some(value) = self.storage.get(&*s) {
+            return value;
+        }
+        let static_s = s.leak();
+        self.storage.insert(static_s);
+        static_s
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct SectionId(&'static str);
+
 #[derive(Debug)]
 enum DetailsLine {
     Text {
+        id: SectionId,
         line: Line<'static>,
     },
     TextToWrap {
+        id: SectionId,
         text: String,
     },
     RawCode {
-        highlighted_line: RefCell<Option<Line<'static>>>,
+        id: SectionId,
         line_numbers: Vec<Span<'static>>,
         code: String,
         path: Arc<BString>,
+        // HACK: only when drawing this line to the screen do we syntax highlight it and cache the
+        // result directly here. We dont have a mutable reference in `Details2::render` so have to
+        // cheat with a `RefCell`.
+        highlighted_line: RefCell<Option<Line<'static>>>,
         bg: Option<Color>,
     },
+    EmptyLine,
 }
 
 fn syntax_highlight(
