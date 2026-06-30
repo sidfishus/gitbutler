@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     collections::HashSet,
     fmt::Display,
-    sync::{Arc, mpsc::TryRecvError},
+    sync::{Arc, Mutex, mpsc::TryRecvError},
     time::Instant,
 };
 
@@ -26,6 +26,8 @@ use crate::{
 
 mod rendering;
 
+const CHANNEL_SIZE: usize = 1024;
+
 #[derive(Debug)]
 pub struct Details2 {
     theme: &'static Theme,
@@ -34,7 +36,7 @@ pub struct Details2 {
     line_reader: ChannelLineReader,
     syntax_set: DebugAsType<OnDemand<SyntaxSet>>,
     syntax_theme: DebugAsType<OnDemand<highlighting::Theme>>,
-    id_storage: HashSet<&'static str>,
+    id_storage: Arc<Mutex<HashSet<&'static str>>>,
     selected_section: Option<SectionId>,
 }
 
@@ -113,24 +115,21 @@ impl Details2 {
                 commit_id: commit, ..
             } => match &mut self.line_reader {
                 ChannelLineReader::NotStarted => {
-                    tracing::info!("spawning thread");
-                    let (tx, rx) = std::sync::mpsc::sync_channel(1024);
+                    tracing::debug!("spawning thread");
+                    let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
                     self.line_reader = ChannelLineReader::Started {
                         rx,
                         start: Instant::now(),
                     };
                     let mut line_writer = ChannelLineWriter { tx };
-                    let mut id_storage = self.id_storage.clone();
+                    let id_storage = Arc::clone(&self.id_storage);
                     let theme = self.theme;
                     let commit = *commit;
                     let ctx = ctx.to_sync();
                     std::thread::spawn(move || {
                         let ctx = ctx.into_thread_local();
-                        let mut id_gen = IdGen {
-                            storage: &mut id_storage,
-                            scope: "details",
-                        };
-                        rendering::render_commit(
+                        let mut id_gen = IdGen::new(id_storage);
+                        if let Err(err) = rendering::render_commit(
                             &ctx,
                             commit,
                             theme,
@@ -138,28 +137,41 @@ impl Details2 {
                             &mut line_writer,
                         )
                         .context("failed rendering commit diff")
-                        .unwrap();
+                            && err.downcast_ref::<SendErrorCode>().is_none()
+                        {
+                            tracing::error!("{err:#}");
+                        }
                     });
                     Ok(true)
                 }
-                ChannelLineReader::Started { rx, start } => match rx.try_recv() {
-                    Ok(line) => {
-                        tracing::info!("read line from channel");
-                        self.lines.push(line);
-                        Ok(true)
-                    }
-                    Err(err) => match err {
-                        TryRecvError::Empty => Ok(false),
-                        TryRecvError::Disconnected => {
-                            tracing::info!(
-                                "finished reading from channel in {:?}",
-                                start.elapsed()
-                            );
-                            self.line_reader = ChannelLineReader::Finished;
-                            Ok(true)
+                ChannelLineReader::Started { rx, start } => {
+                    let mut n = CHANNEL_SIZE;
+                    loop {
+                        match rx.try_recv() {
+                            Ok(line) => {
+                                self.lines.push(line);
+                            }
+                            Err(err) => match err {
+                                TryRecvError::Empty => break Ok(false),
+                                TryRecvError::Disconnected => {
+                                    let num_strings = self.id_storage.lock().unwrap().len();
+                                    tracing::debug!(
+                                        "finished reading from channel in {:?} ({} strings)",
+                                        start.elapsed(),
+                                        num_strings,
+                                    );
+                                    self.line_reader = ChannelLineReader::Finished;
+                                    break Ok(true);
+                                }
+                            },
                         }
-                    },
-                },
+
+                        n -= 1;
+                        if n == 0 {
+                            break Ok(true);
+                        }
+                    }
+                }
                 ChannelLineReader::Finished => Ok(false),
             },
             CliId::UncommittedHunkOrFile(..)
@@ -264,18 +276,18 @@ impl Details2 {
 }
 
 trait LineWriter {
-    fn push(&mut self, line: DetailsLine);
+    fn push(&mut self, line: DetailsLine) -> anyhow::Result<()>;
 
-    fn push_text(&mut self, id: SectionId, line: Line<'static>) {
-        self.push(DetailsLine::Text { id, line });
+    fn push_text(&mut self, id: SectionId, line: Line<'static>) -> anyhow::Result<()> {
+        self.push(DetailsLine::Text { id, line })
     }
 
-    fn push_empty_line(&mut self) {
-        self.push(DetailsLine::EmptyLine);
+    fn push_empty_line(&mut self) -> anyhow::Result<()> {
+        self.push(DetailsLine::EmptyLine)
     }
 
-    fn push_text_to_wrap(&mut self, id: SectionId, text: String) {
-        self.push(DetailsLine::TextToWrap { id, text });
+    fn push_text_to_wrap(&mut self, id: SectionId, text: String) -> anyhow::Result<()> {
+        self.push(DetailsLine::TextToWrap { id, text })
     }
 
     fn push_raw_code(
@@ -285,7 +297,7 @@ trait LineWriter {
         code: String,
         bg: Option<Color>,
         path: Arc<BString>,
-    ) {
+    ) -> anyhow::Result<()> {
         self.push(DetailsLine::RawCode {
             id,
             highlighted_line: RefCell::new(None),
@@ -293,7 +305,7 @@ trait LineWriter {
             code,
             path,
             bg,
-        });
+        })
     }
 }
 
@@ -303,8 +315,9 @@ struct BufferLineWriter {
 }
 
 impl LineWriter for BufferLineWriter {
-    fn push(&mut self, line: DetailsLine) {
+    fn push(&mut self, line: DetailsLine) -> anyhow::Result<()> {
         self.buf.push(line);
+        Ok(())
     }
 }
 
@@ -313,21 +326,47 @@ struct ChannelLineWriter {
 }
 
 impl LineWriter for ChannelLineWriter {
-    fn push(&mut self, line: DetailsLine) {
-        // std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // TODO(david): abort if rx is gone
-        self.tx.send(line);
+    fn push(&mut self, line: DetailsLine) -> anyhow::Result<()> {
+        let result = self.tx.send(line);
+        if result.is_ok() {
+            Ok(())
+        } else {
+            Err(anyhow::Error::new(SendErrorCode))
+        }
     }
 }
 
+/// Error code used to identify errors cause the receiving half of channel having been dropped.
+///
+/// This is expected and will happen if we start rendering the diff of one item but then change our
+/// selection.
+#[derive(Debug)]
+struct SendErrorCode;
+
+impl Display for SendErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("send failed, receiver disconnected")
+    }
+}
+
+impl std::error::Error for SendErrorCode {}
+
 #[derive(Debug)]
 struct IdGen<'a> {
-    storage: &'a mut HashSet<&'static str>,
+    storage: Arc<Mutex<HashSet<&'static str>>>,
     scope: &'static str,
+    _marker: std::marker::PhantomData<&'a mut ()>,
 }
 
 impl IdGen<'_> {
+    fn new(storage: Arc<Mutex<HashSet<&'static str>>>) -> Self {
+        IdGen {
+            storage,
+            scope: "details",
+            _marker: std::marker::PhantomData,
+        }
+    }
+
     fn new_id(&mut self, id: impl Display) -> SectionId {
         SectionId(self.get_or_alloc(format!("{}/{}", self.scope, id)))
     }
@@ -335,17 +374,19 @@ impl IdGen<'_> {
     fn scoped(&mut self, scope: impl Display) -> IdGen<'_> {
         let scope = self.get_or_alloc(format!("{}/{}", self.scope, scope));
         IdGen {
-            storage: self.storage,
+            storage: Arc::clone(&self.storage),
             scope,
+            _marker: std::marker::PhantomData,
         }
     }
 
     fn get_or_alloc(&mut self, s: String) -> &'static str {
-        if let Some(value) = self.storage.get(&*s) {
+        let mut storage = self.storage.lock().unwrap();
+        if let Some(value) = storage.get(&*s) {
             return value;
         }
         let static_s = s.leak();
-        self.storage.insert(static_s);
+        storage.insert(static_s);
         static_s
     }
 }
