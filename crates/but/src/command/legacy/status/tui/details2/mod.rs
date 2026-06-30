@@ -187,40 +187,20 @@ impl Details2 {
 }
 
 trait LineWriter {
-    fn push_text(&mut self, id: SectionId, line: Line<'static>);
+    fn push(&mut self, line: DetailsLine);
 
-    fn push_empty_line(&mut self);
-
-    fn push_text_to_wrap(&mut self, id: SectionId, text: String);
-
-    fn push_raw_code(
-        &mut self,
-        id: SectionId,
-        line_numbers: Vec<Span<'static>>,
-        code: String,
-        bg: Option<Color>,
-        path: Arc<BString>,
-    );
-}
-
-#[derive(Default)]
-struct BufferLineWriter {
-    buf: Vec<DetailsLine>,
-}
-
-impl LineWriter for BufferLineWriter {
     fn push_text(&mut self, id: SectionId, line: Line<'static>) {
         tracing::info!(?id);
-        self.buf.push(DetailsLine::Text { id, line });
+        self.push(DetailsLine::Text { id, line });
     }
 
     fn push_empty_line(&mut self) {
-        self.buf.push(DetailsLine::EmptyLine);
+        self.push(DetailsLine::EmptyLine);
     }
 
     fn push_text_to_wrap(&mut self, id: SectionId, text: String) {
         tracing::info!(?id);
-        self.buf.push(DetailsLine::TextToWrap { id, text });
+        self.push(DetailsLine::TextToWrap { id, text });
     }
 
     fn push_raw_code(
@@ -232,7 +212,7 @@ impl LineWriter for BufferLineWriter {
         path: Arc<BString>,
     ) {
         tracing::info!(?id);
-        self.buf.push(DetailsLine::RawCode {
+        self.push(DetailsLine::RawCode {
             id,
             highlighted_line: RefCell::new(None),
             line_numbers,
@@ -240,6 +220,27 @@ impl LineWriter for BufferLineWriter {
             path,
             bg,
         });
+    }
+}
+
+#[derive(Default)]
+struct BufferLineWriter {
+    buf: Vec<DetailsLine>,
+}
+
+impl LineWriter for BufferLineWriter {
+    fn push(&mut self, line: DetailsLine) {
+        self.buf.push(line);
+    }
+}
+
+struct ChannelLineWriter {
+    tx: std::sync::mpsc::SyncSender<DetailsLine>,
+}
+
+impl LineWriter for ChannelLineWriter {
+    fn push(&mut self, line: DetailsLine) {
+        _ = self.tx.send(line);
     }
 }
 
