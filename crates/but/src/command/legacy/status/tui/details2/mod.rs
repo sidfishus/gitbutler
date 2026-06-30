@@ -42,7 +42,7 @@ pub struct Details2 {
     syntax_set: DebugAsType<OnDemand<SyntaxSet>>,
     syntax_theme: DebugAsType<OnDemand<highlighting::Theme>>,
     strings: Strings,
-    selected_section: Option<usize>,
+    selected_section: SelectedSection,
     sections: Vec<SectionId>,
 }
 
@@ -376,23 +376,39 @@ impl Details2 {
             DetailsMessage::ScrollUp(_) => {}
             DetailsMessage::ScrollDown(_) => {}
             DetailsMessage::SelectNextSection => {
-                if let Some(n) = self.selected_section
-                    && self.sections.get(n + 1).is_some()
+                if let Some(n) = self.selected_section.get_mut()
+                    && self.sections.get(*n + 1).is_some()
                 {
-                    self.selected_section = Some(n + 1);
+                    *n += 1;
                 }
             }
             DetailsMessage::SelectPrevSection => {
-                if let Some(n) = self.selected_section
+                if let Some(n) = self.selected_section.get_mut()
                     && let Some(m) = n.checked_sub(1)
                     && self.sections.get(m).is_some()
                 {
-                    self.selected_section = Some(m);
+                    *n = m;
                 }
             }
-            DetailsMessage::Deselect => {}
+            DetailsMessage::Deselect => {
+                self.selected_section = match self.selected_section {
+                    SelectedSection::None => SelectedSection::None,
+                    SelectedSection::Selected(n) | SelectedSection::Deselected(n) => {
+                        SelectedSection::Deselected(n)
+                    }
+                };
+            }
             DetailsMessage::SelectFirstSection => {
-                self.selected_section = self.sections.first().map(|_| 0);
+                self.selected_section = if self.sections.is_empty() {
+                    SelectedSection::None
+                } else {
+                    match self.selected_section {
+                        SelectedSection::None => SelectedSection::Selected(0),
+                        SelectedSection::Selected(n) | SelectedSection::Deselected(n) => {
+                            SelectedSection::Selected(n)
+                        }
+                    }
+                };
             }
             DetailsMessage::CopyCurrentHunk => {}
             DetailsMessage::GotoTop => {}
@@ -406,7 +422,7 @@ impl Details2 {
 
     fn build_section_list(&mut self) {
         self.sections.clear();
-        self.selected_section = None;
+        self.selected_section = SelectedSection::None;
 
         for line in &self.lines {
             let id = match line {
@@ -429,8 +445,10 @@ impl Details2 {
         if !tui_has_focus {
             return false;
         }
-        self.selected_section
-            .is_some_and(|i| self.sections[i] == id)
+        match self.selected_section {
+            SelectedSection::Selected(n) => self.sections[n] == id,
+            SelectedSection::None | SelectedSection::Deselected(_) => false,
+        }
     }
 }
 
@@ -742,4 +760,28 @@ fn available_lines_in_area(area: Rect) -> impl Iterator<Item = Rect> {
             height: 1,
         }
     })
+}
+
+#[derive(Debug, Default)]
+enum SelectedSection {
+    #[default]
+    None,
+    Selected(usize),
+    Deselected(usize),
+}
+
+impl SelectedSection {
+    fn get(&self) -> Option<&usize> {
+        match self {
+            SelectedSection::None => None,
+            SelectedSection::Selected(n) | SelectedSection::Deselected(n) => Some(n),
+        }
+    }
+
+    fn get_mut(&mut self) -> Option<&mut usize> {
+        match self {
+            SelectedSection::None => None,
+            SelectedSection::Selected(n) | SelectedSection::Deselected(n) => Some(n),
+        }
+    }
 }
