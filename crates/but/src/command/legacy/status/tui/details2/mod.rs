@@ -249,10 +249,11 @@ impl Details2 {
                 DetailsLine::TextToWrap { text, id } => {
                     frame.render_widget(&**text, line_area);
                 }
-                DetailsLine::RawCode {
+                DetailsLine::Code {
                     highlighted_line,
                     line_numbers,
-                    code,
+                    line_start_end,
+                    diff,
                     path,
                     bg,
                     id,
@@ -273,9 +274,14 @@ impl Details2 {
                         // TODO: should this be cached?
                         let mut highlight_lines = HighlightLines::new(syntax, &syntax_theme);
 
+                        let (start, end) = *line_start_end;
+                        let line = diff[start..end].to_str_lossy();
+                        let line = line.strip_suffix('\n').unwrap_or(&line);
+                        let line = line.strip_suffix('\r').unwrap_or(line);
+
                         *highlighted_line.borrow_mut() =
                             Some(Line::from_iter(line_numbers.clone().into_iter().chain(
-                                syntax_highlight(code, *bg, &mut highlight_lines, &syntax_set),
+                                syntax_highlight(line, *bg, &mut highlight_lines, &syntax_set),
                             )));
                     }
 
@@ -328,19 +334,21 @@ trait LineWriter {
         self.push(DetailsLine::TextToWrap { id, text })
     }
 
-    fn push_raw_code(
+    fn push_code(
         &mut self,
         id: SectionId,
         line_numbers: [Span<'static>; 6],
-        code: String,
+        line_start_end: (usize, usize),
+        diff: Arc<BString>,
         bg: Option<Color>,
         path: Arc<BString>,
     ) -> anyhow::Result<()> {
-        self.push(DetailsLine::RawCode {
+        self.push(DetailsLine::Code {
             id,
             highlighted_line: RefCell::new(None),
             line_numbers,
-            code,
+            line_start_end,
+            diff,
             path,
             bg,
         })
@@ -454,10 +462,15 @@ enum DetailsLine {
         id: SectionId,
         text: String,
     },
-    RawCode {
+    Code {
         id: SectionId,
         line_numbers: [Span<'static>; 6],
-        code: String,
+        // indexes into `diff` where the line starts and ends, including any line terminators
+        line_start_end: (usize, usize),
+        // the whole diff this line is part of
+        //
+        // we share the diff and store indexes to get the line to avoid allocating each line
+        diff: Arc<BString>,
         path: Arc<BString>,
         // HACK: only when drawing this line to the screen do we syntax highlight it and cache the
         // result directly here. We dont have a mutable reference in `Details2::render` so have to
