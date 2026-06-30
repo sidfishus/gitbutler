@@ -386,7 +386,7 @@ where
             }
         }
         app::DetailOldOrNew::New(details2) => {
-            if details2.update(ctx, selection)? {
+            if details2.update(ctx, selection, app.is_details_visible)? {
                 app.should_render = true;
 
                 if app.launch_options.quit_after_rendering_full_diff

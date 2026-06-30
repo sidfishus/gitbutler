@@ -8,7 +8,6 @@ use std::{
 use anyhow::Context as _;
 use bstr::{BString, ByteSlice as _};
 use but_ctx::{Context, OnDemand};
-use gix::utils::btoi::MinNumTraits;
 use itertools::{Itertools as _, Position};
 use ratatui::{
     Frame,
@@ -95,7 +94,14 @@ impl Details2 {
         &mut self,
         ctx: &mut Context,
         new_selection: Option<&CliId>,
+        is_visible: bool,
     ) -> anyhow::Result<bool> {
+        if !is_visible {
+            self.lines.clear();
+            self.line_reader = Default::default();
+            return Ok(false);
+        }
+
         let selection = match (self.selection.as_ref(), new_selection) {
             (None, None) => {
                 // no selection
