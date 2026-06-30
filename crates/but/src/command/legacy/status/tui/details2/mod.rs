@@ -278,6 +278,8 @@ impl Details2 {
         let syntax_set = self.syntax_set.get().unwrap();
         let syntax_theme = self.syntax_theme.get().unwrap();
 
+        let test_bg = Color::from_hsl(ratatui::palette::Hsl::new(236.8, 0.162, 0.229));
+
         for (n, line) in self.lines.iter().enumerate() {
             let n = n as u16;
 
@@ -294,10 +296,10 @@ impl Details2 {
 
             match line {
                 DetailsLine::Text { line, id } => {
-                    frame.render_widget(line, line_area);
+                    frame.render_widget(line.clone().bg(test_bg), line_area);
                 }
                 DetailsLine::TextToWrap { text, id } => {
-                    frame.render_widget(&**text, line_area);
+                    frame.render_widget(text.clone().bg(test_bg), line_area);
                 }
                 DetailsLine::Code(line) => {
                     let id = line.id;
@@ -305,15 +307,13 @@ impl Details2 {
                     let mut strings = self.strings.lock();
                     line.ensure_highlighted(&syntax_set, &syntax_theme, self.theme, &mut strings);
 
-                    frame.render_widget(
-                        line.highlighted_line
-                            .borrow()
-                            .as_ref()
-                            .expect("ensure_highlighted was just called"),
-                        line_area,
-                    );
+                    let highlighted_line = line.highlighted_line.borrow();
+                    let highlighted_line = highlighted_line
+                        .as_ref()
+                        .expect("ensure_highlighted was just called");
+                    frame.render_widget(highlighted_line.clone().bg(test_bg), line_area);
                 }
-                DetailsLine::EmptyLine => {
+                DetailsLine::SectionSeparator => {
                     frame.render_widget("", line_area);
                 }
             }
@@ -352,8 +352,12 @@ trait LineWriter {
         self.push(DetailsLine::Text { id, line })
     }
 
-    fn push_empty_line(&mut self) -> anyhow::Result<()> {
-        self.push(DetailsLine::EmptyLine)
+    fn push_empty_line(&mut self, id: SectionId) -> anyhow::Result<()> {
+        self.push_text(id, " ".into())
+    }
+
+    fn push_section_separator(&mut self) -> anyhow::Result<()> {
+        self.push(DetailsLine::SectionSeparator)
     }
 
     fn push_text_to_wrap(&mut self, id: SectionId, text: String) -> anyhow::Result<()> {
@@ -523,7 +527,7 @@ enum DetailsLine {
     Text { id: SectionId, line: Line<'static> },
     TextToWrap { id: SectionId, text: String },
     Code(DetailsCodeLine),
-    EmptyLine,
+    SectionSeparator,
 }
 
 #[derive(Debug)]

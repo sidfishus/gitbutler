@@ -64,13 +64,13 @@ pub fn render_commit(
         ),
     )?;
 
-    out.push_empty_line()?;
+    out.push_section_separator()?;
 
     let message_id = id_gen.new_id("message");
     let message = commit_details.commit.message.to_string();
     if !message.is_empty() {
         out.push_text_to_wrap(message_id, message)?;
-        out.push_empty_line()?;
+        out.push_section_separator()?;
     }
 
     let tree_changes = commit_details
@@ -126,11 +126,11 @@ pub fn render_uncommitted(
             out,
         )?;
 
-        out.push_text(id, "".into())?;
+        out.push_empty_line(id)?;
 
         build_hunk_assignment(id, hunk_assignment, theme, out)?;
 
-        out.push_empty_line()?;
+        out.push_section_separator()?;
     }
 
     Ok(())
@@ -163,7 +163,11 @@ pub fn render_uncommitted_hunk(
             out,
         )?;
 
+        out.push_empty_line(id)?;
+
         build_hunk_assignment(id, hunk_assignment, theme, out)?;
+
+        out.push_section_separator()?;
     }
 
     Ok(())
@@ -315,7 +319,7 @@ fn build_tree_changes(
                         out,
                     )?;
 
-                    out.push_empty_line()?;
+                    out.push_section_separator()?;
                 }
             }
             UnifiedPatch::Binary => {
@@ -331,7 +335,7 @@ fn build_tree_changes(
 
                 out.push_text(patch_id, "Binary file - no diff available".into())?;
 
-                out.push_empty_line()?;
+                out.push_section_separator()?;
             }
             UnifiedPatch::TooLarge { size_in_bytes } => {
                 let patch_id = id_gen.new_id("too_large");
@@ -349,7 +353,7 @@ fn build_tree_changes(
                     format!("File too large ({size_in_bytes} bytes) - no diff available").into(),
                 )?;
 
-                out.push_empty_line()?;
+                out.push_section_separator()?;
             }
         }
     }
@@ -405,7 +409,7 @@ fn render_hunk_path_header(
             .chain([Span::raw(path)]),
     );
     bordered_line_top_right_bottom(id, path_line, out, theme)?;
-    out.push_text(id, "".into())?;
+    out.push_empty_line(id)?;
     Ok(())
 }
 
