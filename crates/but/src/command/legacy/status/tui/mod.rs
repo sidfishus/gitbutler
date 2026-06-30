@@ -271,7 +271,7 @@ where
             } else {
                 Duration::from_millis(30)
             }
-        },
+        }
     };
     // poll terminal events
     for event in event_polling.poll(event_poll_timeout)? {

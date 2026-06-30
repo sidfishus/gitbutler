@@ -143,17 +143,40 @@ impl Details2 {
                     std::thread::spawn(move || {
                         let ctx = ctx.into_thread_local();
                         let mut id_gen = IdGen::new(id_storage);
-                        if let Err(err) = rendering::render_commit(
-                            &ctx,
-                            commit,
-                            theme,
-                            &mut id_gen,
-                            &mut line_writer,
-                        )
-                        .context("failed rendering commit diff")
-                            && err.downcast_ref::<SendErrorCode>().is_none()
+
+                        let info = allocation_counter::measure(|| {
+                            if let Err(err) = rendering::render_commit(
+                                &ctx,
+                                commit,
+                                theme,
+                                &mut id_gen,
+                                &mut line_writer,
+                            )
+                            .context("failed rendering commit diff")
+                                && err.downcast_ref::<SendErrorCode>().is_none()
+                            {
+                                tracing::error!("{err:#}");
+                            }
+                        });
+
                         {
-                            tracing::error!("{err:#}");
+                            fn format_thousands_with_dots(number: u64) -> String {
+                                let digits = number.to_string();
+                                let separator_count = digits.len().saturating_sub(1) / 3;
+                                let mut formatted =
+                                    String::with_capacity(digits.len() + separator_count);
+                                for (index, digit) in digits.chars().enumerate() {
+                                    if index > 0 && (digits.len() - index).is_multiple_of(3) {
+                                        formatted.push('.');
+                                    }
+                                    formatted.push(digit);
+                                }
+                                formatted
+                            }
+                            tracing::debug!(
+                                "allocations: {}",
+                                format_thousands_with_dots(info.count_total)
+                            );
                         }
                     });
                     Ok(true)
