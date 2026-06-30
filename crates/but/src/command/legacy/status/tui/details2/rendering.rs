@@ -24,7 +24,7 @@ pub fn render_commit(
     commit: ObjectId,
     theme: &'static Theme,
     id_gen: &mut IdGen<'_>,
-    out: &mut dyn LineWriter,
+    out: &mut impl LineWriter,
 ) -> anyhow::Result<()> {
     let commit_details =
         but_api::diff::commit_details(ctx, commit, but_api::diff::ComputeLineStats::No)?;
@@ -79,7 +79,7 @@ fn build_tree_changes(
     tree_changes: &[TreeChange],
     theme: &'static Theme,
     id_gen: &mut IdGen<'_>,
-    out: &mut dyn LineWriter,
+    out: &mut impl LineWriter,
 ) -> anyhow::Result<()> {
     let mut id_gen = id_gen.scoped("tree_changes");
 
@@ -196,7 +196,7 @@ fn render_hunk_path_header(
     id: SectionId,
     path: &BStr,
     status: Option<ShortIdOrTreeStatus<'_>>,
-    out: &mut dyn LineWriter,
+    out: &mut impl LineWriter,
     theme: &'static Theme,
 ) -> anyhow::Result<()> {
     let status = status.map(|id_or_status| match id_or_status {
@@ -231,7 +231,7 @@ fn change_status(status: &TreeStatus, theme: &'static Theme) -> Span<'static> {
 fn bordered_line_top_right_bottom(
     id: SectionId,
     mut text: Line<'static>,
-    out: &mut dyn LineWriter,
+    out: &mut impl LineWriter,
     theme: &'static Theme,
 ) -> anyhow::Result<()> {
     let width_including_padding = text.width() + 1;
@@ -261,7 +261,7 @@ fn build_unified_patch(
     hunk: DiffHunk,
     is_result_of_binary_to_text_conversion: bool,
     theme: &'static Theme,
-    out: &mut dyn LineWriter,
+    out: &mut impl LineWriter,
 ) -> anyhow::Result<()> {
     let DiffHunk {
         old_start,
