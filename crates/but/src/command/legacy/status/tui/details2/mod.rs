@@ -83,11 +83,7 @@ impl Details2 {
         }
     }
 
-    pub fn update(
-        &mut self,
-        ctx: &mut Context,
-        new_selection: Option<&CliId>,
-    ) -> anyhow::Result<bool> {
+    pub fn update(&mut self, ctx: &Context, new_selection: Option<&CliId>) -> anyhow::Result<bool> {
         let selection = match (self.selection.as_ref(), new_selection) {
             (None, None) => {
                 // no selection
@@ -131,78 +127,95 @@ impl Details2 {
         match selection {
             CliId::Commit {
                 commit_id: commit, ..
-            } => match &mut self.line_reader {
-                ChannelLineReader::NotStarted => {
-                    tracing::debug!("spawning thread");
-                    let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
-                    self.line_reader = ChannelLineReader::Started {
-                        rx,
-                        start: Instant::now(),
-                    };
-                    let mut line_writer = ChannelLineWriter { tx };
-                    let strings = self.strings.clone();
-                    let theme = self.theme;
-                    let commit = *commit;
-                    let ctx = ctx.to_sync();
-                    std::thread::spawn(move || {
-                        let ctx = ctx.into_thread_local();
-                        let mut id_gen = IdGen::new(strings);
-
-                        if let Err(err) = rendering::render_commit(
-                            commit,
-                            &ctx,
-                            theme,
-                            &mut id_gen,
-                            &mut line_writer,
-                        )
-                        .context("failed rendering commit diff")
-                            && err.downcast_ref::<SendErrorCode>().is_none()
-                        {
-                            tracing::error!("{err:#}");
-                        }
-                    });
-                    Ok(true)
-                }
-                ChannelLineReader::Started { rx, start } => {
-                    let mut n = CHANNEL_SIZE;
-                    loop {
-                        match rx.try_recv() {
-                            Ok(line) => {
-                                self.lines.push(line);
-                            }
-                            Err(err) => match err {
-                                TryRecvError::Empty => break Ok(false),
-                                TryRecvError::Disconnected => {
-                                    let num_strings = self.strings.len();
-                                    tracing::debug!(
-                                        "finished reading from channel in {:?} ({} lines, {} strings)",
-                                        start.elapsed(),
-                                        self.lines.len(),
-                                        num_strings,
-                                    );
-                                    self.line_reader = ChannelLineReader::Finished;
-                                    break Ok(true);
-                                }
-                            },
-                        }
-
-                        n -= 1;
-                        if n == 0 {
-                            break Ok(true);
-                        }
-                    }
-                }
-                ChannelLineReader::Finished => Ok(false),
-            },
+            } => {
+                let commit = *commit;
+                self.spawn_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
+                    rendering::render_commit(commit, ctx, theme, id_gen, line_writer)
+                })
+            }
+            CliId::Branch { name, .. } => {
+                let name = name.to_owned();
+                self.spawn_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
+                    rendering::render_branch(name, ctx, theme, id_gen, line_writer)
+                })
+            }
             CliId::UncommittedHunkOrFile(..)
             | CliId::PathPrefix { .. }
             | CliId::CommittedFile { .. }
-            | CliId::Branch { .. }
             | CliId::Uncommitted { .. }
             | CliId::Stack { .. } => {
                 self.lines.clear();
                 Ok(true)
             }
+        }
+    }
+
+    fn spawn_render_thread<F>(&mut self, ctx: &Context, f: F) -> anyhow::Result<bool>
+    where
+        F: FnOnce(
+                &Context,
+                &'static Theme,
+                &mut IdGen<'_>,
+                &mut dyn LineWriter,
+            ) -> anyhow::Result<()>
+            + Send
+            + 'static,
+    {
+        match &mut self.line_reader {
+            ChannelLineReader::NotStarted => {
+                tracing::debug!("spawning thread");
+                let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
+                self.line_reader = ChannelLineReader::Started {
+                    rx,
+                    start: Instant::now(),
+                };
+                let mut line_writer = ChannelLineWriter { tx };
+                let strings = self.strings.clone();
+                let theme = self.theme;
+                let ctx = ctx.to_sync();
+                std::thread::spawn(move || {
+                    let ctx = ctx.into_thread_local();
+                    let mut id_gen = IdGen::new(strings);
+
+                    if let Err(err) = f(&ctx, theme, &mut id_gen, &mut line_writer)
+                        .context("failed rendering commit diff")
+                        && err.downcast_ref::<SendErrorCode>().is_none()
+                    {
+                        tracing::error!("{err:#}");
+                    }
+                });
+                Ok(true)
+            }
+            ChannelLineReader::Started { rx, start } => {
+                let mut n = CHANNEL_SIZE;
+                loop {
+                    match rx.try_recv() {
+                        Ok(line) => {
+                            self.lines.push(line);
+                        }
+                        Err(err) => match err {
+                            TryRecvError::Empty => break Ok(false),
+                            TryRecvError::Disconnected => {
+                                let num_strings = self.strings.len();
+                                tracing::debug!(
+                                    "finished reading from channel in {:?} ({} lines, {} strings)",
+                                    start.elapsed(),
+                                    self.lines.len(),
+                                    num_strings,
+                                );
+                                self.line_reader = ChannelLineReader::Finished;
+                                break Ok(true);
+                            }
+                        },
+                    }
+
+                    n -= 1;
+                    if n == 0 {
+                        break Ok(true);
+                    }
+                }
+            }
+            ChannelLineReader::Finished => Ok(false),
         }
     }
 
