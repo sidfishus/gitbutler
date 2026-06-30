@@ -331,7 +331,7 @@ trait LineWriter {
     fn push_raw_code(
         &mut self,
         id: SectionId,
-        line_numbers: Vec<Span<'static>>,
+        line_numbers: [Span<'static>; 6],
         code: String,
         bg: Option<Color>,
         path: Arc<BString>,
@@ -444,6 +444,7 @@ impl IdGen<'_> {
 struct SectionId(&'static str);
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum DetailsLine {
     Text {
         id: SectionId,
@@ -455,7 +456,7 @@ enum DetailsLine {
     },
     RawCode {
         id: SectionId,
-        line_numbers: Vec<Span<'static>>,
+        line_numbers: [Span<'static>; 6],
         code: String,
         path: Arc<BString>,
         // HACK: only when drawing this line to the screen do we syntax highlight it and cache the

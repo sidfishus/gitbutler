@@ -311,39 +311,39 @@ fn build_unified_patch(
     for line in diff.lines().skip(1) {
         let (line_numbers, code, bg) = if let Some(rest) = line.strip_prefix(b"+") {
             let code = rest.to_str_lossy().to_string();
-            let line_numbers = Vec::from_iter([
+            let line_numbers = [
                 Span::raw(" ".repeat(old_width as _)),
                 Span::styled(" ┊ ", theme.border),
                 Span::raw(" ".repeat((new_width - num_digits(new_line_num)) as _)),
                 Span::raw(id_gen.strings.get_u32(new_line_num)).style(theme.addition),
                 Span::styled(" │ ", theme.border),
                 Span::raw("+").style(theme.addition_rich),
-            ]);
+            ];
             new_line_num += 1;
             (line_numbers, code, theme.addition_rich.bg)
         } else if let Some(rest) = line.strip_prefix(b"-") {
             let code = rest.to_str_lossy().to_string();
-            let line_numbers = Vec::from_iter([
+            let line_numbers = [
                 Span::raw(" ".repeat((old_width - num_digits(old_line_num)) as _)),
                 Span::raw(id_gen.strings.get_u32(old_line_num)).style(theme.deletion),
                 Span::styled(" ┊ ", theme.border),
                 Span::raw(" ".repeat(new_width as _)),
                 Span::styled(" │ ", theme.border),
                 Span::raw("-").style(theme.deletion_rich),
-            ]);
+            ];
             old_line_num += 1;
             (line_numbers, code, theme.deletion_rich.bg)
         } else {
             let line = line.strip_prefix(b" ").unwrap_or(line);
             let code = line.to_str_lossy().to_string();
-            let line_numbers = Vec::from_iter([
+            let line_numbers = [
                 Span::raw(" ".repeat((old_width - num_digits(old_line_num)) as _)),
                 Span::styled(id_gen.strings.get_u32(old_line_num), theme.hint),
                 Span::styled(" ┊ ", theme.border),
                 Span::raw(" ".repeat((new_width - num_digits(new_line_num)) as _)),
                 Span::styled(id_gen.strings.get_u32(new_line_num), theme.hint),
                 Span::styled(" │  ", theme.border),
-            ]);
+            ];
             old_line_num += 1;
             new_line_num += 1;
             (line_numbers, code, None)
