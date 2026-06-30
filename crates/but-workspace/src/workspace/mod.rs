@@ -4,34 +4,33 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
 use but_core::RefMetadata;
-use but_rebase::graph_rebase::{Editor, LookupStep, Pick, Selector, Step};
+use but_rebase::graph_rebase::{
+    Editor, LookupStep, Pick, Selector, Step, workspace::ReferenceStatus,
+};
 use gix::prelude::ObjectIdExt;
 use renderdag::{Ancestor, GraphRowRenderer, LinkLine, NodeLine, PadLine, Renderer};
 
-use crate::{ref_info::Commit, ui::PushStatus};
-
-/// More information about a reference
-pub struct AdditionalRefInfo {
-    /// Does it have a remote? If so, who dis?
-    pub remote_ref: Option<gix::refs::FullName>,
-    /// Push status for just this reference.
-    pub push_status: PushStatus,
-    /// Push status for this reference combined with whether any parents will
-    /// also result in a force push.
-    pub combined_push_status: PushStatus,
-}
+use crate::{ref_info::Commit, ui::CommitState};
 
 /// A graph row's data
 #[expect(clippy::large_enum_variant)]
 pub enum GraphRowData {
     /// A commit :D
-    Commit(Commit),
+    Commit {
+        /// The commit.
+        commit: Commit,
+        /// The commit's state (local-only / local-and-remote / integrated), as
+        /// computed by the Editor's workspace projection.
+        state: CommitState,
+    },
     /// A reference
     Reference {
         /// The name of the reference
         ref_name: gix::refs::FullName,
-        /// More information about the reference
-        additional_ref_info: Option<AdditionalRefInfo>,
+        /// More information about the reference, computed by the Editor's
+        /// workspace projection. `None` for references the projection didn't
+        /// status (e.g. non-local-branch references).
+        additional_ref_info: Option<ReferenceStatus>,
     },
 }
 
@@ -101,7 +100,7 @@ pub fn detailed_graph_workspace<M: RefMetadata>(
         stacks: ws
             .stacks
             .iter()
-            .map(|stack| stack_rows(&editor, stack))
+            .map(|stack| stack_rows(&editor, stack, &ws.reference_status, &ws.commit_state))
             .collect::<Result<Vec<_>>>()?,
     })
 }
@@ -109,6 +108,8 @@ pub fn detailed_graph_workspace<M: RefMetadata>(
 fn stack_rows<M: RefMetadata>(
     editor: &Editor<'_, '_, M>,
     stack: &but_rebase::graph_rebase::Subgraph,
+    reference_status: &HashMap<Selector, ReferenceStatus>,
+    commit_state: &HashMap<Selector, CommitState>,
 ) -> Result<Stack> {
     let mut visible_nodes = HashSet::new();
     for selector in &stack.nodes {
@@ -136,7 +137,7 @@ fn stack_rows<M: RefMetadata>(
         rows.push((
             node,
             GraphRow {
-                data: row_data(editor, node)?,
+                data: row_data(editor, node, reference_status, commit_state)?,
                 node_line: rendered.node_line,
                 link_line: rendered.link_line,
                 term_line: rendered.term_line,
@@ -346,14 +347,20 @@ fn reference_segments(
 fn row_data<M: RefMetadata>(
     editor: &Editor<'_, '_, M>,
     selector: Selector,
+    reference_status: &HashMap<Selector, ReferenceStatus>,
+    commit_state: &HashMap<Selector, CommitState>,
 ) -> Result<GraphRowData> {
     Ok(match editor.lookup_step(selector)? {
-        Step::Pick(Pick { id, .. }) => {
-            GraphRowData::Commit(but_core::Commit::from_id(id.attach(editor.repo()))?.into())
-        }
+        Step::Pick(Pick { id, .. }) => GraphRowData::Commit {
+            commit: but_core::Commit::from_id(id.attach(editor.repo()))?.into(),
+            state: commit_state
+                .get(&selector)
+                .cloned()
+                .unwrap_or(CommitState::LocalOnly),
+        },
         Step::Reference { refname, .. } => GraphRowData::Reference {
             ref_name: refname,
-            additional_ref_info: None,
+            additional_ref_info: reference_status.get(&selector).cloned(),
         },
         Step::None => unreachable!("None steps are not visible rows"),
     })
