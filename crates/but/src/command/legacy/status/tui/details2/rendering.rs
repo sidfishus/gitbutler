@@ -310,6 +310,8 @@ fn build_unified_patch(
 
     let diff = Arc::new(diff);
 
+    let mut strings = id_gen.strings.lock();
+
     let mut first_line = true;
     let mut i = 0;
     for line in diff.lines_with_terminator() {
@@ -322,10 +324,13 @@ fn build_unified_patch(
             let start = i + 1;
             let end = start + rest.len();
             let line_numbers = [
-                Span::raw(" ".repeat(old_width as _)),
+                Span::raw(strings.get_spaces(old_width as _)),
                 Span::styled(" ┊ ", theme.border),
-                Span::raw(" ".repeat((new_width - num_digits(new_line_num)) as _)),
-                Span::raw(id_gen.strings.get_u32(new_line_num)).style(theme.addition),
+                Span::raw(
+                        strings
+                        .get_spaces((new_width - num_digits(new_line_num)) as _),
+                ),
+                Span::raw(strings.get_u32(new_line_num)).style(theme.addition),
                 Span::styled(" │ ", theme.border),
                 Span::raw("+").style(theme.addition_rich),
             ];
@@ -335,10 +340,13 @@ fn build_unified_patch(
             let start = i + 1;
             let end = start + rest.len();
             let line_numbers = [
-                Span::raw(" ".repeat((old_width - num_digits(old_line_num)) as _)),
-                Span::raw(id_gen.strings.get_u32(old_line_num)).style(theme.deletion),
+                Span::raw(
+                        strings
+                        .get_spaces((old_width - num_digits(old_line_num)) as _),
+                ),
+                Span::raw(strings.get_u32(old_line_num)).style(theme.deletion),
                 Span::styled(" ┊ ", theme.border),
-                Span::raw(" ".repeat(new_width as _)),
+                Span::raw(strings.get_spaces(new_width as _)),
                 Span::styled(" │ ", theme.border),
                 Span::raw("-").style(theme.deletion_rich),
             ];
@@ -352,11 +360,17 @@ fn build_unified_patch(
                 (i, i + line.len())
             };
             let line_numbers = [
-                Span::raw(" ".repeat((old_width - num_digits(old_line_num)) as _)),
-                Span::styled(id_gen.strings.get_u32(old_line_num), theme.hint),
+                Span::raw(
+                        strings
+                        .get_spaces((old_width - num_digits(old_line_num)) as _),
+                ),
+                Span::styled(strings.get_u32(old_line_num), theme.hint),
                 Span::styled(" ┊ ", theme.border),
-                Span::raw(" ".repeat((new_width - num_digits(new_line_num)) as _)),
-                Span::styled(id_gen.strings.get_u32(new_line_num), theme.hint),
+                Span::raw(
+                        strings
+                        .get_spaces((new_width - num_digits(new_line_num)) as _),
+                ),
+                Span::styled(strings.get_u32(new_line_num), theme.hint),
                 Span::styled(" │  ", theme.border),
             ];
             old_line_num += 1;

@@ -1,8 +1,7 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
     fmt::Display,
-    sync::{Arc, Mutex, mpsc::TryRecvError},
+    sync::{Arc, mpsc::TryRecvError},
     time::Instant,
 };
 
@@ -19,12 +18,13 @@ use syntect::{easy::HighlightLines, highlighting, parsing::SyntaxSet};
 
 use crate::{
     CliId,
-    command::legacy::status::tui::{Message, details::DetailsMessage},
+    command::legacy::status::tui::{Message, details::DetailsMessage, details2::strings::Strings},
     theme::Theme,
     utils::DebugAsType,
 };
 
 mod rendering;
+mod strings;
 
 const CHANNEL_SIZE: usize = 1024;
 
@@ -384,39 +384,6 @@ impl Display for SendErrorCode {
 }
 
 impl std::error::Error for SendErrorCode {}
-
-#[derive(Debug, Default, Clone)]
-struct Strings {
-    storage: Arc<Mutex<HashSet<&'static str>>>,
-    u32s: Arc<Mutex<HashMap<u32, &'static str>>>,
-}
-
-impl Strings {
-    fn len(&self) -> usize {
-        let Self { storage, u32s } = self;
-        storage.lock().unwrap().len() + u32s.lock().unwrap().len()
-    }
-
-    fn get(&self, s: String) -> &'static str {
-        let mut storage = self.storage.lock().unwrap();
-        if let Some(value) = storage.get(&*s) {
-            return value;
-        }
-        let static_s = s.leak();
-        storage.insert(static_s);
-        static_s
-    }
-
-    fn get_u32(&self, n: u32) -> &'static str {
-        let mut storage = self.u32s.lock().unwrap();
-        if let Some(value) = storage.get(&n) {
-            return value;
-        }
-        let static_s = n.to_string().leak();
-        storage.insert(n, static_s);
-        static_s
-    }
-}
 
 #[derive(Debug)]
 struct IdGen<'a> {
