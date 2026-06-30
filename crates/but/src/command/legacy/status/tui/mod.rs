@@ -382,6 +382,12 @@ where
         app::DetailOldOrNew::New(details2) => {
             if details2.update(ctx, selection)? {
                 app.should_render = true;
+
+                if app.launch_options.quit_after_rendering_full_diff
+                    && details2.is_finished_rendering()
+                {
+                    app.outcome = Some(TuiOutcome::None);
+                }
             }
         }
     }

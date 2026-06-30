@@ -65,6 +65,13 @@ impl Details2 {
         }
     }
 
+    pub fn is_finished_rendering(&self) -> bool {
+        match &self.line_reader {
+            ChannelLineReader::NotStarted | ChannelLineReader::Started { .. } => false,
+            ChannelLineReader::Finished => true,
+        }
+    }
+
     pub fn update(
         &mut self,
         ctx: &mut Context,
