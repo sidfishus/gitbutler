@@ -234,9 +234,9 @@ describe("buildStackEndpoints", () => {
 
 	test("uses apply for branch application", () => {
 		const endpoints = buildStackEndpoints(createEndpointBuilder());
-		const query = endpoints.branchApply.query;
+		const query = endpoints.applyBranch.query;
 
-		expect(endpoints.branchApply.extraOptions).toEqual({
+		expect(endpoints.applyBranch.extraOptions).toEqual({
 			command: "apply",
 			actionName: "Apply Branch",
 		});
@@ -250,7 +250,7 @@ describe("buildStackEndpoints", () => {
 			projectId: "project-1",
 			existingBranch: "refs/heads/feature",
 		});
-		expect(endpoints.branchApply.invalidatesTags).toEqual([
+		expect(endpoints.applyBranch.invalidatesTags).toEqual([
 			invalidatesList(ReduxTag.HeadMetadata),
 			invalidatesList(ReduxTag.HeadSha),
 			invalidatesList(ReduxTag.WorktreeChanges),

@@ -730,8 +730,8 @@ export class StackService {
 		});
 	}
 
-	get branchApply() {
-		return this.backendApi.endpoints.branchApply.mutate;
+	get applyBranch() {
+		return this.backendApi.endpoints.applyBranch.mutate;
 	}
 
 	get createVirtualBranchFromBranch() {

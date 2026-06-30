@@ -848,7 +848,7 @@ export function buildStackEndpoints(build: BackendEndpointBuilder) {
 							invalidatesItem(ReduxTag.IntegrationSteps, args.branchRef),
 						],
 		}),
-		branchApply: build.mutation<ApplyOutcome, { projectId: string; existingBranch: string }>({
+		applyBranch: build.mutation<ApplyOutcome, { projectId: string; existingBranch: string }>({
 			extraOptions: {
 				command: "apply",
 				actionName: "Apply Branch",

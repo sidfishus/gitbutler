@@ -97,12 +97,16 @@
 		defaultValue: 20,
 	};
 
-	async function checkoutBranch(args: { branchName: string; remote?: string; hasLocal: boolean }) {
+	async function applyBranchToWorkspace(args: {
+		branchName: string;
+		remote?: string;
+		hasLocal: boolean;
+	}) {
 		const { remote, hasLocal, branchName } = args;
 		const remoteRef = remote ? `refs/remotes/${remote}/${branchName}` : undefined;
 		const branchRef = hasLocal ? `refs/heads/${branchName}` : remoteRef;
 		if (branchRef) {
-			await stackService.branchApply({
+			await stackService.applyBranch({
 				projectId,
 				existingBranch: branchRef,
 			});
@@ -320,7 +324,7 @@
 													icon="workbench"
 													shrinkable
 													action={async () => {
-														await checkoutBranch({ remote, branchName, hasLocal });
+														await applyBranchToWorkspace({ remote, branchName, hasLocal });
 													}}
 												>
 													Apply to workspace
