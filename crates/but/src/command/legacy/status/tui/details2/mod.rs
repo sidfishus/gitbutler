@@ -42,8 +42,8 @@ pub struct Details2 {
     syntax_set: DebugAsType<OnDemand<SyntaxSet>>,
     syntax_theme: DebugAsType<OnDemand<highlighting::Theme>>,
     strings: Strings,
-    selected_section: SelectedSection,
-    sections: Vec<SectionId>,
+    selected_section: Cell<SelectedSection>,
+    sections: Vec<Section>,
     scroll: ScrollState,
     layout_cache: RefCell<LayoutCache>,
 }
@@ -69,7 +69,7 @@ impl Details2 {
             syntax_set: OnDemand::new(|| Ok(SyntaxSet::load_defaults_newlines())).into(),
             syntax_theme: OnDemand::new(|| theme.load_syntax_highlighting_theme()).into(),
             strings: Default::default(),
-            selected_section: Default::default(),
+            selected_section: Cell::default(),
             line_reader: Default::default(),
             scroll: Default::default(),
             layout_cache: Default::default(),
@@ -314,6 +314,8 @@ impl Details2 {
         }
 
         let scroll_top = self.scroll.top();
+        self.update_selected_section_for_visible_range(scroll_top, viewport_height, &layout_cache);
+
         let Some((mut line_index, mut line_offset)) = layout_cache.line_at_display_row(scroll_top)
         else {
             return;
@@ -355,42 +357,61 @@ impl Details2 {
             DetailsMessage::ScrollUp(n) => self.scroll.up(n),
             DetailsMessage::ScrollDown(n) => self.scroll.down(n),
             DetailsMessage::SelectNextSection => {
-                if let Some(n) = self.selected_section.get_mut()
-                    && self.sections.get(*n + 1).is_some()
+                let selected_section = self.selected_section.get();
+                if let Some(n) = selected_section.index()
+                    && self.sections.get(n + 1).is_some()
                 {
-                    *n += 1;
+                    self.selected_section
+                        .set(selected_section.with_index(n + 1));
                 }
             }
             DetailsMessage::SelectPrevSection => {
-                if let Some(n) = self.selected_section.get_mut()
+                let selected_section = self.selected_section.get();
+                if let Some(n) = selected_section.index()
                     && let Some(m) = n.checked_sub(1)
                     && self.sections.get(m).is_some()
                 {
-                    *n = m;
+                    self.selected_section.set(selected_section.with_index(m));
                 }
             }
             DetailsMessage::Deselect => {
-                self.selected_section = match self.selected_section {
-                    SelectedSection::None => SelectedSection::None,
-                    SelectedSection::Selected(n) | SelectedSection::Deselected(n) => {
-                        SelectedSection::Deselected(n)
-                    }
-                };
+                self.selected_section
+                    .set(match self.selected_section.get() {
+                        SelectedSection::None => SelectedSection::None,
+                        SelectedSection::Selected(n) | SelectedSection::Deselected(n) => {
+                            SelectedSection::Deselected(n)
+                        }
+                    });
             }
             DetailsMessage::SelectFirstSection => {
-                self.selected_section = if self.sections.is_empty() {
+                self.selected_section.set(if self.sections.is_empty() {
                     SelectedSection::None
                 } else {
-                    match self.selected_section {
+                    match self.selected_section.get() {
                         SelectedSection::None => SelectedSection::Selected(0),
                         SelectedSection::Selected(n) | SelectedSection::Deselected(n) => {
                             SelectedSection::Selected(n)
                         }
                     }
-                };
+                });
             }
-            DetailsMessage::GotoTop => self.scroll.goto_top(),
-            DetailsMessage::GotoBottom => self.scroll.goto_bottom(),
+            DetailsMessage::GotoTop => {
+                self.scroll.goto_top();
+                self.selected_section.set(if self.sections.is_empty() {
+                    SelectedSection::None
+                } else {
+                    SelectedSection::Selected(0)
+                });
+            }
+            DetailsMessage::GotoBottom => {
+                self.scroll.goto_bottom();
+                self.selected_section.set(
+                    self.sections
+                        .len()
+                        .checked_sub(1)
+                        .map_or(SelectedSection::None, SelectedSection::Selected),
+                );
+            }
             DetailsMessage::CopyCurrentHunk => {}
             DetailsMessage::StartRub => {}
         }
@@ -483,9 +504,9 @@ impl Details2 {
 
     fn build_section_list(&mut self) {
         self.sections.clear();
-        self.selected_section = SelectedSection::None;
+        self.selected_section.set(SelectedSection::None);
 
-        for line in &self.lines {
+        for (line_index, line) in self.lines.iter().enumerate() {
             let id = match line {
                 DetailsLine::Text { id, .. } => {
                     if let Some(id) = id {
@@ -498,22 +519,96 @@ impl Details2 {
                 DetailsLine::SectionSeparator | DetailsLine::TextToWrap { .. } => continue,
             };
 
-            if let Some(last) = self.sections.last() {
-                if id != *last {
-                    self.sections.push(id);
-                }
-            } else {
-                self.sections.push(id);
+            if let Some(last) = self.sections.last_mut()
+                && last.id == id
+            {
+                last.last_line = line_index;
+                continue;
             }
+
+            self.sections.push(Section {
+                id,
+                first_line: line_index,
+                last_line: line_index,
+            });
         }
+    }
+
+    fn update_selected_section_for_visible_range(
+        &self,
+        visible_start: usize,
+        viewport_height: usize,
+        layout_cache: &LayoutCache,
+    ) {
+        let SelectedSection::Selected(selected_index) = self.selected_section.get() else {
+            return;
+        };
+        let visible_end = visible_start.saturating_add(viewport_height);
+        if visible_start >= visible_end {
+            return;
+        }
+
+        if self.sections.get(selected_index).is_some_and(|section| {
+            section_intersects_visible_range(section, visible_start, visible_end, layout_cache)
+        }) {
+            return;
+        }
+
+        let Some(direction) = self.scroll.direction() else {
+            return;
+        };
+        let new_index = match direction {
+            ScrollDirection::Down => {
+                self.topmost_visible_section_index(visible_start, visible_end, layout_cache)
+            }
+            ScrollDirection::Up => {
+                self.bottommost_visible_section_index(visible_start, visible_end, layout_cache)
+            }
+        };
+
+        if let Some(new_index) = new_index {
+            self.selected_section
+                .set(SelectedSection::Selected(new_index));
+        }
+    }
+
+    fn topmost_visible_section_index(
+        &self,
+        visible_start: usize,
+        visible_end: usize,
+        layout_cache: &LayoutCache,
+    ) -> Option<usize> {
+        let index = self.sections.partition_point(|section| {
+            section_display_range(section, layout_cache).1 <= visible_start
+        });
+        self.sections.get(index).and_then(|section| {
+            section_intersects_visible_range(section, visible_start, visible_end, layout_cache)
+                .then_some(index)
+        })
+    }
+
+    fn bottommost_visible_section_index(
+        &self,
+        visible_start: usize,
+        visible_end: usize,
+        layout_cache: &LayoutCache,
+    ) -> Option<usize> {
+        let index = self.sections.partition_point(|section| {
+            section_display_range(section, layout_cache).0 < visible_end
+        });
+        let index = index.checked_sub(1)?;
+        self.sections.get(index).and_then(|section| {
+            section_intersects_visible_range(section, visible_start, visible_end, layout_cache)
+                .then_some(index)
+        })
     }
 
     fn should_highlight_section(&self, id: SectionId, tui_has_focus: bool) -> bool {
         if !tui_has_focus {
             return false;
         }
-        match self.selected_section {
-            SelectedSection::Selected(n) => self.sections[n] == id,
+        match self.selected_section.get() {
+            SelectedSection::Selected(n) => self.sections[n].id == id,
             SelectedSection::None | SelectedSection::Deselected(_) => false,
         }
     }
@@ -631,6 +726,13 @@ impl IdGen<'_> {
 /// it.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct SectionId(&'static str);
+
+#[derive(Debug)]
+struct Section {
+    id: SectionId,
+    first_line: usize,
+    last_line: usize,
+}
 
 #[derive(Debug, Copy, Clone)]
 struct CodeLineNumbers {
@@ -837,6 +939,7 @@ impl Drop for NumThreadsGuard {
 struct ScrollState {
     top: Cell<usize>,
     pending: Cell<Option<ScrollIntent>>,
+    direction: Cell<Option<ScrollDirection>>,
 }
 
 impl ScrollState {
@@ -851,20 +954,28 @@ impl ScrollState {
     fn up(&self, n: usize) {
         self.top.set(self.top.get().saturating_sub(n));
         self.pending.set(None);
+        self.direction.set(Some(ScrollDirection::Up));
     }
 
     fn down(&self, n: usize) {
         self.top.set(self.top.get().saturating_add(n));
         self.pending.set(None);
+        self.direction.set(Some(ScrollDirection::Down));
     }
 
     fn goto_top(&self) {
         self.top.set(0);
         self.pending.set(None);
+        self.direction.set(Some(ScrollDirection::Up));
     }
 
     fn goto_bottom(&self) {
         self.pending.set(Some(ScrollIntent::Bottom));
+        self.direction.set(Some(ScrollDirection::Down));
+    }
+
+    fn direction(&self) -> Option<ScrollDirection> {
+        self.direction.get()
     }
 
     fn take_pending(&self) -> Option<ScrollIntent> {
@@ -876,12 +987,19 @@ impl ScrollState {
     fn reset(&self) {
         self.top.set(0);
         self.pending.set(None);
+        self.direction.set(None);
     }
 }
 
 #[derive(Debug, Copy, Clone)]
 enum ScrollIntent {
     Bottom,
+}
+
+#[derive(Debug, Copy, Clone)]
+enum ScrollDirection {
+    Up,
+    Down,
 }
 
 #[derive(Debug, Default)]
@@ -936,6 +1054,31 @@ impl LayoutCache {
         let line_index = self.prefix_sum.partition_point(|start| *start <= row) - 1;
         Some((line_index, row - self.prefix_sum[line_index]))
     }
+
+    fn display_row_for_line(&self, line_index: usize) -> usize {
+        self.prefix_sum[line_index]
+    }
+
+    fn display_row_after_line(&self, line_index: usize) -> usize {
+        self.prefix_sum[line_index + 1]
+    }
+}
+
+fn section_intersects_visible_range(
+    section: &Section,
+    visible_start: usize,
+    visible_end: usize,
+    layout_cache: &LayoutCache,
+) -> bool {
+    let (section_start, section_end) = section_display_range(section, layout_cache);
+    section_start < visible_end && section_end > visible_start
+}
+
+fn section_display_range(section: &Section, layout_cache: &LayoutCache) -> (usize, usize) {
+    (
+        layout_cache.display_row_for_line(section.first_line),
+        layout_cache.display_row_after_line(section.last_line),
+    )
 }
 
 fn display_height(line: &DetailsLine, width: u16) -> usize {
@@ -986,7 +1129,7 @@ fn available_lines_in_area(area: Rect) -> impl Iterator<Item = Rect> {
     })
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Copy, Clone, Default)]
 enum SelectedSection {
     #[default]
     None,
@@ -995,17 +1138,19 @@ enum SelectedSection {
 }
 
 impl SelectedSection {
-    fn get(&self) -> Option<&usize> {
+    fn index(self) -> Option<usize> {
         match self {
             SelectedSection::None => None,
             SelectedSection::Selected(n) | SelectedSection::Deselected(n) => Some(n),
         }
     }
 
-    fn get_mut(&mut self) -> Option<&mut usize> {
+    fn with_index(self, index: usize) -> Self {
         match self {
-            SelectedSection::None => None,
-            SelectedSection::Selected(n) | SelectedSection::Deselected(n) => Some(n),
+            SelectedSection::None | SelectedSection::Selected(_) => {
+                SelectedSection::Selected(index)
+            }
+            SelectedSection::Deselected(_) => SelectedSection::Deselected(index),
         }
     }
 }
