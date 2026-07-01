@@ -61,7 +61,7 @@ impl Details2 {
     pub fn new(theme: &'static Theme) -> Self {
         Self {
             theme,
-            selection: None,
+            selection: Default::default(),
             lines: Default::default(),
             sections: Default::default(),
             syntax_set: OnDemand::new(|| Ok(SyntaxSet::load_defaults_newlines())).into(),
