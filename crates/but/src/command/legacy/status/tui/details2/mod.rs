@@ -101,7 +101,7 @@ impl Details2 {
         is_visible: bool,
     ) -> anyhow::Result<bool> {
         if !is_visible {
-            self.lines.clear();
+            self.clear_lines();
             self.line_reader = Default::default();
             self.reset_scroll();
             return Ok(false);
@@ -110,7 +110,7 @@ impl Details2 {
         let selection = match (self.selection.as_ref(), new_selection) {
             (None, None) => {
                 // no selection
-                self.lines.clear();
+                self.clear_lines();
                 self.line_reader = Default::default();
                 self.reset_scroll();
 
@@ -120,7 +120,7 @@ impl Details2 {
                 // selected something
                 self.selection = Some(new.clone());
 
-                self.lines.clear();
+                self.clear_lines();
                 self.line_reader = Default::default();
                 self.reset_scroll();
 
@@ -129,7 +129,7 @@ impl Details2 {
             (Some(_), None) => {
                 // deselected
                 self.selection = None;
-                self.lines.clear();
+                self.clear_lines();
                 self.line_reader = Default::default();
                 self.reset_scroll();
 
@@ -143,7 +143,7 @@ impl Details2 {
                 } else {
                     // selected something new
                     self.selection = Some(new.clone());
-                    self.lines.clear();
+                    self.clear_lines();
                     self.line_reader = Default::default();
                     self.reset_scroll();
                     new
@@ -198,17 +198,21 @@ impl Details2 {
                 })
             }
             CliId::Stack { .. } => {
-                self.lines.clear();
+                self.clear_lines();
                 self.reset_scroll();
-                self.lines.push(DetailsLine::Text {
-                    id: None,
-                    line: Line::from("(stack assignments are not supported)")
-                        .style(self.theme.hint),
-                });
+                push_line(
+                    &mut self.lines,
+                    &mut self.sections,
+                    DetailsLine::Text {
+                        id: None,
+                        line: Line::from("(stack assignments are not supported)")
+                            .style(self.theme.hint),
+                    },
+                );
                 Ok(true)
             }
             CliId::PathPrefix { .. } => {
-                self.lines.clear();
+                self.clear_lines();
                 self.reset_scroll();
                 Ok(true)
             }
@@ -265,7 +269,7 @@ impl Details2 {
                 loop {
                     match rx.try_recv() {
                         Ok(line) => {
-                            self.lines.push(line);
+                            push_line(&mut self.lines, &mut self.sections, line);
                         }
                         Err(err) => match err {
                             TryRecvError::Empty => break Ok(false),
@@ -278,7 +282,6 @@ impl Details2 {
                                     num_strings,
                                 );
                                 self.line_reader = ChannelLineReader::Finished;
-                                self.build_section_list();
                                 break Ok(true);
                             }
                         },
@@ -502,36 +505,10 @@ impl Details2 {
         *self.layout_cache.borrow_mut() = LayoutCache::default();
     }
 
-    fn build_section_list(&mut self) {
+    fn clear_lines(&mut self) {
+        self.lines.clear();
         self.sections.clear();
         self.selected_section.set(SelectedSection::None);
-
-        for (line_index, line) in self.lines.iter().enumerate() {
-            let id = match line {
-                DetailsLine::Text { id, .. } => {
-                    if let Some(id) = id {
-                        *id
-                    } else {
-                        continue;
-                    }
-                }
-                DetailsLine::Code(line) => line.id,
-                DetailsLine::SectionSeparator | DetailsLine::TextToWrap { .. } => continue,
-            };
-
-            if let Some(last) = self.sections.last_mut()
-                && last.id == id
-            {
-                last.last_line = line_index;
-                continue;
-            }
-
-            self.sections.push(Section {
-                id,
-                first_line: line_index,
-                last_line: line_index,
-            });
-        }
     }
 
     fn update_selected_section_for_visible_range(
@@ -732,6 +709,39 @@ struct Section {
     id: SectionId,
     first_line: usize,
     last_line: usize,
+}
+
+fn push_line(lines: &mut Vec<DetailsLine>, sections: &mut Vec<Section>, line: DetailsLine) {
+    let line_index = lines.len();
+    extend_section_list(sections, line_index, &line);
+    lines.push(line);
+}
+
+fn extend_section_list(sections: &mut Vec<Section>, line_index: usize, line: &DetailsLine) {
+    let id = match line {
+        DetailsLine::Text { id, .. } => {
+            if let Some(id) = id {
+                *id
+            } else {
+                return;
+            }
+        }
+        DetailsLine::Code(line) => line.id,
+        DetailsLine::SectionSeparator | DetailsLine::TextToWrap { .. } => return,
+    };
+
+    if let Some(last) = sections.last_mut()
+        && last.id == id
+    {
+        last.last_line = line_index;
+        return;
+    }
+
+    sections.push(Section {
+        id,
+        first_line: line_index,
+        last_line: line_index,
+    });
 }
 
 #[derive(Debug, Copy, Clone)]
