@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     fmt::Display,
     sync::{Arc, atomic::AtomicUsize, mpsc::TryRecvError},
     time::Instant,
@@ -44,6 +44,8 @@ pub struct Details2 {
     strings: Strings,
     selected_section: SelectedSection,
     sections: Vec<SectionId>,
+    scroll: ScrollState,
+    layout_cache: RefCell<LayoutCache>,
 }
 
 #[derive(Debug, Default)]
@@ -69,6 +71,8 @@ impl Details2 {
             strings: Default::default(),
             selected_section: Default::default(),
             line_reader: Default::default(),
+            scroll: Default::default(),
+            layout_cache: Default::default(),
         }
     }
 
@@ -99,6 +103,7 @@ impl Details2 {
         if !is_visible {
             self.lines.clear();
             self.line_reader = Default::default();
+            self.reset_scroll();
             return Ok(false);
         }
 
@@ -107,6 +112,7 @@ impl Details2 {
                 // no selection
                 self.lines.clear();
                 self.line_reader = Default::default();
+                self.reset_scroll();
 
                 return Ok(false);
             }
@@ -116,6 +122,7 @@ impl Details2 {
 
                 self.lines.clear();
                 self.line_reader = Default::default();
+                self.reset_scroll();
 
                 new
             }
@@ -124,6 +131,7 @@ impl Details2 {
                 self.selection = None;
                 self.lines.clear();
                 self.line_reader = Default::default();
+                self.reset_scroll();
 
                 return Ok(true);
             }
@@ -137,6 +145,7 @@ impl Details2 {
                     self.selection = Some(new.clone());
                     self.lines.clear();
                     self.line_reader = Default::default();
+                    self.reset_scroll();
                     new
                 }
             }
@@ -190,6 +199,7 @@ impl Details2 {
             }
             CliId::Stack { id, .. } => {
                 self.lines.clear();
+                self.reset_scroll();
                 let mut id_gen = IdGen::new(self.strings.clone());
                 let mut id_gen = id_gen.scoped("stack");
                 self.lines.push(DetailsLine::Text {
@@ -201,6 +211,7 @@ impl Details2 {
             }
             CliId::PathPrefix { .. } => {
                 self.lines.clear();
+                self.reset_scroll();
                 Ok(true)
             }
         }
@@ -291,73 +302,45 @@ impl Details2 {
 
         let selection_highlight = self.theme.discrete_selection_highlight.bg.unwrap();
 
+        let mut layout_cache = self.layout_cache.borrow_mut();
+        layout_cache.update(area.width, &self.lines);
+
+        let total_display_lines = layout_cache.total_display_lines();
+        let viewport_height = area.height as usize;
+        let max_scroll_top = total_display_lines.saturating_sub(viewport_height);
+
+        let should_scroll_to_bottom =
+            matches!(self.scroll.take_pending(), Some(ScrollIntent::Bottom));
+        if should_scroll_to_bottom || self.scroll.top() > max_scroll_top {
+            self.scroll.set_top(max_scroll_top);
+        }
+
+        let scroll_top = self.scroll.top();
+        let Some((mut line_index, mut line_offset)) = layout_cache.line_at_display_row(scroll_top)
+        else {
+            return;
+        };
+        drop(layout_cache);
+
         let mut areas = available_lines_in_area(area);
-        'outer: for line in &self.lines {
-            match line {
-                DetailsLine::Text { line, id } => {
-                    let Some(line_area) = areas.next() else {
-                        break;
-                    };
+        while let Some(line) = self.lines.get(line_index) {
+            let rendered = self.render_details_line(
+                line,
+                line_offset,
+                &mut areas,
+                area.width,
+                tui_has_focus,
+                selection_highlight,
+                &syntax_set,
+                &syntax_theme,
+                frame,
+            );
 
-                    if self.should_highlight_section(*id, tui_has_focus) {
-                        frame.render_widget(line.clone().bg(selection_highlight), line_area);
-                    } else {
-                        frame.render_widget(line, line_area);
-                    }
-                }
-                DetailsLine::TextToWrap { text, id } => {
-                    for line in textwrap::wrap(text, textwrap::Options::new(area.width as usize))
-                        .into_iter()
-                        .with_position()
-                        .filter_map(|(pos, line)| match pos {
-                            Position::First | Position::Middle | Position::Only => Some(line),
-                            Position::Last => (!line.is_empty()).then_some(line),
-                        })
-                        .map(|line| if line.is_empty() { " ".into() } else { line })
-                    {
-                        let Some(line_area) = areas.next() else {
-                            break 'outer;
-                        };
-
-                        if self.should_highlight_section(*id, tui_has_focus) {
-                            frame
-                                .render_widget(Line::from(line).bg(selection_highlight), line_area);
-                        } else {
-                            frame.render_widget(&*line, line_area);
-                        }
-                    }
-                }
-                DetailsLine::Code(line) => {
-                    let Some(line_area) = areas.next() else {
-                        break;
-                    };
-
-                    let id = line.id;
-
-                    let mut strings = self.strings.lock();
-                    line.ensure_highlighted(&syntax_set, &syntax_theme, self.theme, &mut strings);
-
-                    let highlighted_line = line.highlighted_line.borrow();
-                    let highlighted_line = highlighted_line
-                        .as_ref()
-                        .expect("ensure_highlighted was just called");
-
-                    if self.should_highlight_section(id, tui_has_focus) {
-                        frame.render_widget(
-                            highlighted_line.clone().bg(selection_highlight),
-                            line_area,
-                        );
-                    } else {
-                        frame.render_widget(highlighted_line, line_area);
-                    }
-                }
-                DetailsLine::SectionSeparator => {
-                    let Some(line_area) = areas.next() else {
-                        break;
-                    };
-
-                    frame.render_widget("", line_area);
-                }
+            if !rendered.filled_viewport {
+                line_index += 1;
+                line_offset = 0;
+            } else {
+                break;
             }
         }
     }
@@ -372,8 +355,8 @@ impl Details2 {
         tracing::debug!(?msg);
 
         match msg {
-            DetailsMessage::ScrollUp(_) => {}
-            DetailsMessage::ScrollDown(_) => {}
+            DetailsMessage::ScrollUp(n) => self.scroll.up(n),
+            DetailsMessage::ScrollDown(n) => self.scroll.down(n),
             DetailsMessage::SelectNextSection => {
                 if let Some(n) = self.selected_section.get_mut()
                     && self.sections.get(*n + 1).is_some()
@@ -410,12 +393,97 @@ impl Details2 {
                 };
             }
             DetailsMessage::CopyCurrentHunk => {}
-            DetailsMessage::GotoTop => {}
-            DetailsMessage::GotoBottom => {}
+            DetailsMessage::GotoTop => self.scroll.goto_top(),
+            DetailsMessage::GotoBottom => self.scroll.goto_bottom(),
             DetailsMessage::StartRub => {}
         }
 
         Ok(())
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn render_details_line(
+        &self,
+        line: &DetailsLine,
+        skip_display_lines: usize,
+        areas: &mut impl Iterator<Item = Rect>,
+        width: u16,
+        tui_has_focus: bool,
+        selection_highlight: Color,
+        syntax_set: &SyntaxSet,
+        syntax_theme: &highlighting::Theme,
+        frame: &mut Frame,
+    ) -> RenderedLine {
+        match line {
+            DetailsLine::Text { line, id } => {
+                if skip_display_lines == 0 {
+                    let Some(line_area) = areas.next() else {
+                        return RenderedLine::viewport_filled();
+                    };
+
+                    if self.should_highlight_section(*id, tui_has_focus) {
+                        frame.render_widget(line.clone().bg(selection_highlight), line_area);
+                    } else {
+                        frame.render_widget(line, line_area);
+                    }
+                }
+            }
+            DetailsLine::TextToWrap { text, id } => {
+                for line in wrapped_text_lines(text, width).skip(skip_display_lines) {
+                    let Some(line_area) = areas.next() else {
+                        return RenderedLine::viewport_filled();
+                    };
+
+                    if self.should_highlight_section(*id, tui_has_focus) {
+                        frame.render_widget(Line::from(line).bg(selection_highlight), line_area);
+                    } else {
+                        frame.render_widget(&*line, line_area);
+                    }
+                }
+            }
+            DetailsLine::Code(line) => {
+                if skip_display_lines == 0 {
+                    let Some(line_area) = areas.next() else {
+                        return RenderedLine::viewport_filled();
+                    };
+
+                    let id = line.id;
+
+                    let mut strings = self.strings.lock();
+                    line.ensure_highlighted(&syntax_set, &syntax_theme, self.theme, &mut strings);
+
+                    let highlighted_line = line.highlighted_line.borrow();
+                    let highlighted_line = highlighted_line
+                        .as_ref()
+                        .expect("ensure_highlighted was just called");
+
+                    if self.should_highlight_section(id, tui_has_focus) {
+                        frame.render_widget(
+                            highlighted_line.clone().bg(selection_highlight),
+                            line_area,
+                        );
+                    } else {
+                        frame.render_widget(highlighted_line, line_area);
+                    }
+                }
+            }
+            DetailsLine::SectionSeparator => {
+                if skip_display_lines == 0 {
+                    let Some(line_area) = areas.next() else {
+                        return RenderedLine::viewport_filled();
+                    };
+
+                    frame.render_widget("", line_area);
+                }
+            }
+        }
+
+        RenderedLine::line_finished()
+    }
+
+    fn reset_scroll(&self) {
+        self.scroll.reset();
+        *self.layout_cache.borrow_mut() = LayoutCache::default();
     }
 
     fn build_section_list(&mut self) {
@@ -745,6 +813,147 @@ impl NumThreadsGuard {
 impl Drop for NumThreadsGuard {
     fn drop(&mut self) {
         NUM_THREADS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Default)]
+struct ScrollState {
+    top: Cell<usize>,
+    pending: Cell<Option<ScrollIntent>>,
+}
+
+impl ScrollState {
+    fn top(&self) -> usize {
+        self.top.get()
+    }
+
+    fn set_top(&self, top: usize) {
+        self.top.set(top);
+    }
+
+    fn up(&self, n: usize) {
+        self.top.set(self.top.get().saturating_sub(n));
+        self.pending.set(None);
+    }
+
+    fn down(&self, n: usize) {
+        self.top.set(self.top.get().saturating_add(n));
+        self.pending.set(None);
+    }
+
+    fn goto_top(&self) {
+        self.top.set(0);
+        self.pending.set(None);
+    }
+
+    fn goto_bottom(&self) {
+        self.pending.set(Some(ScrollIntent::Bottom));
+    }
+
+    fn take_pending(&self) -> Option<ScrollIntent> {
+        let pending = self.pending.get();
+        self.pending.set(None);
+        pending
+    }
+
+    fn reset(&self) {
+        self.top.set(0);
+        self.pending.set(None);
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+enum ScrollIntent {
+    Bottom,
+}
+
+#[derive(Debug, Default)]
+struct LayoutCache {
+    width: u16,
+    line_count: usize,
+    heights: Vec<usize>,
+    prefix_sum: Vec<usize>,
+}
+
+impl LayoutCache {
+    fn update(&mut self, width: u16, lines: &[DetailsLine]) {
+        if self.width != width || self.line_count > lines.len() {
+            self.rebuild(width, lines);
+            return;
+        }
+
+        if self.line_count == lines.len() {
+            return;
+        }
+
+        if self.prefix_sum.is_empty() {
+            self.prefix_sum.push(0);
+        }
+
+        for line in &lines[self.line_count..] {
+            let height = display_height(line, width);
+            self.heights.push(height);
+            let next = self.prefix_sum.last().copied().unwrap_or_default() + height;
+            self.prefix_sum.push(next);
+        }
+        self.line_count = lines.len();
+    }
+
+    fn rebuild(&mut self, width: u16, lines: &[DetailsLine]) {
+        self.width = width;
+        self.line_count = 0;
+        self.heights.clear();
+        self.prefix_sum.clear();
+        self.update(width, lines);
+    }
+
+    fn total_display_lines(&self) -> usize {
+        self.prefix_sum.last().copied().unwrap_or_default()
+    }
+
+    fn line_at_display_row(&self, row: usize) -> Option<(usize, usize)> {
+        if self.line_count == 0 || row >= self.total_display_lines() {
+            return None;
+        }
+
+        let line_index = self.prefix_sum.partition_point(|start| *start <= row) - 1;
+        Some((line_index, row - self.prefix_sum[line_index]))
+    }
+}
+
+fn display_height(line: &DetailsLine, width: u16) -> usize {
+    match line {
+        DetailsLine::Text { .. } | DetailsLine::Code(_) | DetailsLine::SectionSeparator => 1,
+        DetailsLine::TextToWrap { text, .. } => wrapped_text_lines(text, width).count(),
+    }
+}
+
+fn wrapped_text_lines(text: &str, width: u16) -> impl Iterator<Item = std::borrow::Cow<'_, str>> {
+    textwrap::wrap(text, textwrap::Options::new(usize::from(width.max(1))))
+        .into_iter()
+        .with_position()
+        .filter_map(|(pos, line)| match pos {
+            Position::First | Position::Middle | Position::Only => Some(line),
+            Position::Last => (!line.is_empty()).then_some(line),
+        })
+        .map(|line| if line.is_empty() { " ".into() } else { line })
+}
+
+struct RenderedLine {
+    filled_viewport: bool,
+}
+
+impl RenderedLine {
+    fn viewport_filled() -> Self {
+        Self {
+            filled_viewport: true,
+        }
+    }
+
+    fn line_finished() -> Self {
+        Self {
+            filled_viewport: false,
+        }
     }
 }
 
