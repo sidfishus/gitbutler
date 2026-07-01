@@ -390,9 +390,9 @@ impl Details2 {
                     }
                 };
             }
-            DetailsMessage::CopyCurrentHunk => {}
             DetailsMessage::GotoTop => self.scroll.goto_top(),
             DetailsMessage::GotoBottom => self.scroll.goto_bottom(),
+            DetailsMessage::CopyCurrentHunk => {}
             DetailsMessage::StartRub => {}
         }
 
