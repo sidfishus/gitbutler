@@ -347,7 +347,6 @@ impl Details2 {
     pub fn try_handle_message(
         &mut self,
         msg: DetailsMessage,
-        _viewport: Rect,
         _messages: &mut Vec<Message>,
     ) -> anyhow::Result<()> {
         tracing::debug!(?msg);

@@ -455,7 +455,7 @@ impl App {
                         details.try_handle_message(details_message, details_viewport, messages)?;
                     }
                     DetailOldOrNew::New(details2) => {
-                        details2.try_handle_message(details_message, details_viewport, messages)?;
+                        details2.try_handle_message(details_message, messages)?;
                     }
                 }
             }
