@@ -13,6 +13,7 @@ use but_core::{
 use but_ctx::Context;
 use but_hunk_assignment::HunkAssignment;
 use gix::{ObjectId, actor::Signature};
+use itertools::{Itertools, Position};
 use ratatui::{
     style::Stylize as _,
     text::{Line, Span},
@@ -115,7 +116,9 @@ pub fn render_uncommitted(
         hunk_assignment.stack_id.is_none()
     })?;
 
-    for (raw_id, UncommittedHunk { hunk_assignment }) in uncommitted_hunks {
+    for (pos, (raw_id, UncommittedHunk { hunk_assignment })) in
+        uncommitted_hunks.into_iter().with_position()
+    {
         let id = id_gen.new_id(raw_id);
 
         build_hunk_path_header(
@@ -130,7 +133,9 @@ pub fn render_uncommitted(
 
         build_hunk_assignment(id, hunk_assignment, theme, out)?;
 
-        out.push_section_separator()?;
+        if pos.needs_padding_below() {
+            out.push_section_separator()?;
+        }
     }
 
     Ok(())
@@ -152,7 +157,9 @@ pub fn render_uncommitted_hunk(
         uncommitted_hunk_matches_selection(hunk_assignment, &hunk)
     })?;
 
-    for (raw_id, UncommittedHunk { hunk_assignment }) in uncommitted_hunks {
+    for (pos, (raw_id, UncommittedHunk { hunk_assignment })) in
+        uncommitted_hunks.into_iter().with_position()
+    {
         let id = id_gen.new_id(raw_id);
 
         build_hunk_path_header(
@@ -167,7 +174,9 @@ pub fn render_uncommitted_hunk(
 
         build_hunk_assignment(id, hunk_assignment, theme, out)?;
 
-        out.push_section_separator()?;
+        if pos.needs_padding_below() {
+            out.push_section_separator()?;
+        }
     }
 
     Ok(())
@@ -277,7 +286,7 @@ fn build_tree_changes(
 ) -> anyhow::Result<()> {
     let mut id_gen = id_gen.scoped("tree_changes");
 
-    for (i, tree_change) in tree_changes.iter().enumerate() {
+    for (tree_change_pos, (i, tree_change)) in tree_changes.iter().enumerate().with_position() {
         let mut id_gen = id_gen.scoped(i);
 
         let path = Arc::new(tree_change.path_bytes.clone());
@@ -297,7 +306,7 @@ fn build_tree_changes(
             } => {
                 let mut first_hunk = true;
                 let mut id_gen = id_gen.scoped("hunks");
-                for (j, hunk) in hunks.into_iter().enumerate() {
+                for (hunk_pos, (j, hunk)) in hunks.into_iter().enumerate().with_position() {
                     let hunk_id = id_gen.new_id(j);
 
                     if std::mem::take(&mut first_hunk) {
@@ -319,7 +328,9 @@ fn build_tree_changes(
                         out,
                     )?;
 
-                    out.push_section_separator()?;
+                    if tree_change_pos.needs_padding_below() || hunk_pos.needs_padding_below() {
+                        out.push_section_separator()?;
+                    }
                 }
             }
             UnifiedPatch::Binary => {
@@ -335,7 +346,9 @@ fn build_tree_changes(
 
                 out.push_text(patch_id, "Binary file - no diff available".into())?;
 
-                out.push_section_separator()?;
+                if tree_change_pos.needs_padding_below() {
+                    out.push_section_separator()?;
+                }
             }
             UnifiedPatch::TooLarge { size_in_bytes } => {
                 let patch_id = id_gen.new_id("too_large");
@@ -353,7 +366,9 @@ fn build_tree_changes(
                     format!("File too large ({size_in_bytes} bytes) - no diff available").into(),
                 )?;
 
-                out.push_section_separator()?;
+                if tree_change_pos.needs_padding_below() {
+                    out.push_section_separator()?;
+                }
             }
         }
     }
@@ -614,5 +629,18 @@ fn uncommitted_hunk_matches_selection(
             && hunk_assignment.stack_id == selected_hunk.stack_id
     } else {
         hunk_assignment == selected_hunk && hunk_assignment.stack_id == selected_hunk.stack_id
+    }
+}
+
+trait PositionExt {
+    fn needs_padding_below(self) -> bool;
+}
+
+impl PositionExt for Position {
+    fn needs_padding_below(self) -> bool {
+        match self {
+            Position::First | Position::Middle => true,
+            Position::Last | Position::Only => false,
+        }
     }
 }
