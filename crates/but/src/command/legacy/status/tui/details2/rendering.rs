@@ -42,35 +42,24 @@ pub fn render_commit(
     let commit_details =
         but_api::diff::commit_details(ctx, commit, but_api::diff::ComputeLineStats::No)?;
 
-    let commit_header_id = id_gen.new_id("header");
-    out.push_text(
-        commit_header_id,
-        Line::from_iter([
-            Span::raw(format!("{:<11}", "Commit ID:")),
-            Span::styled(commit.to_hex().to_string(), theme.commit_id),
-        ]),
-    )?;
-    out.push_text(
-        commit_header_id,
-        Line::from_iter(
-            once(Span::raw(format!("{:<11}", "Author:")))
-                .chain(render_signature(&commit_details.commit.author, theme)),
-        ),
-    )?;
-    out.push_text(
-        commit_header_id,
-        Line::from_iter(
-            once(Span::raw(format!("{:<11}", "Committer:")))
-                .chain(render_signature(&commit_details.commit.committer, theme)),
-        ),
-    )?;
+    out.push_non_selectable_text(Line::from_iter([
+        Span::raw(format!("{:<11}", "Commit ID:")),
+        Span::styled(commit.to_hex().to_string(), theme.commit_id),
+    ]))?;
+    out.push_non_selectable_text(Line::from_iter(
+        once(Span::raw(format!("{:<11}", "Author:")))
+            .chain(render_signature(&commit_details.commit.author, theme)),
+    ))?;
+    out.push_non_selectable_text(Line::from_iter(
+        once(Span::raw(format!("{:<11}", "Committer:")))
+            .chain(render_signature(&commit_details.commit.committer, theme)),
+    ))?;
 
     out.push_section_separator()?;
 
-    let message_id = id_gen.new_id("message");
     let message = commit_details.commit.message.to_string();
     if !message.is_empty() {
-        out.push_text_to_wrap(message_id, message)?;
+        out.push_text_to_wrap(message)?;
         out.push_section_separator()?;
     }
 
@@ -265,10 +254,10 @@ fn build_hunk_assignment(
                 out,
             )?;
         } else {
-            out.push_text(id, "No diff available".into())?;
+            out.push_selectable_text(id, "No diff available".into())?;
         }
     } else {
-        out.push_text(
+        out.push_selectable_text(
             id,
             "No diff available - file is either empty, binary, or too large".into(),
         )?;
@@ -344,7 +333,7 @@ fn build_tree_changes(
                     theme,
                 )?;
 
-                out.push_text(patch_id, "Binary file - no diff available".into())?;
+                out.push_selectable_text(patch_id, "Binary file - no diff available".into())?;
 
                 if tree_change_pos.needs_padding_below() {
                     out.push_section_separator()?;
@@ -361,7 +350,7 @@ fn build_tree_changes(
                     theme,
                 )?;
 
-                out.push_text(
+                out.push_selectable_text(
                     patch_id,
                     format!("File too large ({size_in_bytes} bytes) - no diff available").into(),
                 )?;
@@ -396,7 +385,6 @@ fn render_signature(
 }
 
 enum ShortIdOrTreeStatus<'a> {
-    #[expect(dead_code)]
     ShortId(&'a str),
     TreeStatus(&'a TreeStatus),
 }
@@ -445,7 +433,7 @@ fn bordered_line_top_right_bottom(
 ) -> anyhow::Result<()> {
     let width_including_padding = text.width() + 1;
 
-    out.push_text(
+    out.push_selectable_text(
         id,
         Line::from_iter(repeat_n("─", width_including_padding).chain(once("╮")))
             .style(theme.border),
@@ -453,9 +441,9 @@ fn bordered_line_top_right_bottom(
 
     text.spans
         .extend([Span::raw(" "), Span::styled("│", theme.border)]);
-    out.push_text(id, text)?;
+    out.push_selectable_text(id, text)?;
 
-    out.push_text(
+    out.push_selectable_text(
         id,
         Line::from_iter(repeat_n("─", width_including_padding).chain(once("╯")))
             .style(theme.border),
@@ -481,16 +469,16 @@ fn build_unified_patch(
     } = hunk;
 
     if is_result_of_binary_to_text_conversion {
-        out.push_text(id, "(diff generated from binary-to-text conversion)".into())?;
+        out.push_selectable_text(id, "(diff generated from binary-to-text conversion)".into())?;
     }
 
     if let Some(headers) = diff.lines().next() {
-        out.push_text(
+        out.push_selectable_text(
             id,
             Span::styled(headers.to_str_lossy().to_string(), theme.hint).into(),
         )?;
 
-        out.push_text(
+        out.push_selectable_text(
             id,
             Line::from_iter(repeat_n("─", headers.to_str_lossy().width())).style(theme.border),
         )?;

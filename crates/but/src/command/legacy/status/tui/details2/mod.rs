@@ -197,13 +197,11 @@ impl Details2 {
                     )
                 })
             }
-            CliId::Stack { id, .. } => {
+            CliId::Stack { .. } => {
                 self.lines.clear();
                 self.reset_scroll();
-                let mut id_gen = IdGen::new(self.strings.clone());
-                let mut id_gen = id_gen.scoped("stack");
                 self.lines.push(DetailsLine::Text {
-                    id: id_gen.new_id(id),
+                    id: None,
                     line: Line::from("(stack assignments are not supported)")
                         .style(self.theme.hint),
                 });
@@ -421,24 +419,22 @@ impl Details2 {
                         return RenderedLine::viewport_filled();
                     };
 
-                    if self.should_highlight_section(*id, tui_has_focus) {
+                    if let Some(id) = id
+                        && self.should_highlight_section(*id, tui_has_focus)
+                    {
                         frame.render_widget(line.clone().bg(selection_highlight), line_area);
                     } else {
                         frame.render_widget(line, line_area);
                     }
                 }
             }
-            DetailsLine::TextToWrap { text, id } => {
+            DetailsLine::TextToWrap { text } => {
                 for line in wrapped_text_lines(text, width).skip(skip_display_lines) {
                     let Some(line_area) = areas.next() else {
                         return RenderedLine::viewport_filled();
                     };
 
-                    if self.should_highlight_section(*id, tui_has_focus) {
-                        frame.render_widget(Line::from(line).bg(selection_highlight), line_area);
-                    } else {
-                        frame.render_widget(&*line, line_area);
-                    }
+                    frame.render_widget(&*line, line_area);
                 }
             }
             DetailsLine::Code(line) => {
@@ -450,7 +446,7 @@ impl Details2 {
                     let id = line.id;
 
                     let mut strings = self.strings.lock();
-                    line.ensure_highlighted(&syntax_set, &syntax_theme, self.theme, &mut strings);
+                    line.ensure_highlighted(syntax_set, syntax_theme, self.theme, &mut strings);
 
                     let highlighted_line = line.highlighted_line.borrow();
                     let highlighted_line = highlighted_line
@@ -492,9 +488,15 @@ impl Details2 {
 
         for line in &self.lines {
             let id = match line {
-                DetailsLine::Text { id, .. } | DetailsLine::TextToWrap { id, .. } => *id,
+                DetailsLine::Text { id, .. } => {
+                    if let Some(id) = id {
+                        *id
+                    } else {
+                        continue;
+                    }
+                }
                 DetailsLine::Code(line) => line.id,
-                DetailsLine::SectionSeparator => continue,
+                DetailsLine::SectionSeparator | DetailsLine::TextToWrap { .. } => continue,
             };
 
             if let Some(last) = self.sections.last() {
@@ -521,20 +523,24 @@ impl Details2 {
 trait LineWriter {
     fn push(&mut self, line: DetailsLine) -> anyhow::Result<()>;
 
-    fn push_text(&mut self, id: SectionId, line: Line<'static>) -> anyhow::Result<()> {
-        self.push(DetailsLine::Text { id, line })
+    fn push_selectable_text(&mut self, id: SectionId, line: Line<'static>) -> anyhow::Result<()> {
+        self.push(DetailsLine::Text { id: Some(id), line })
+    }
+
+    fn push_non_selectable_text(&mut self, line: Line<'static>) -> anyhow::Result<()> {
+        self.push(DetailsLine::Text { id: None, line })
     }
 
     fn push_empty_line(&mut self, id: SectionId) -> anyhow::Result<()> {
-        self.push_text(id, " ".into())
+        self.push_selectable_text(id, " ".into())
     }
 
     fn push_section_separator(&mut self) -> anyhow::Result<()> {
         self.push(DetailsLine::SectionSeparator)
     }
 
-    fn push_text_to_wrap(&mut self, id: SectionId, text: String) -> anyhow::Result<()> {
-        self.push(DetailsLine::TextToWrap { id, text })
+    fn push_text_to_wrap(&mut self, text: String) -> anyhow::Result<()> {
+        self.push(DetailsLine::TextToWrap { text })
     }
 
     fn push_code(
@@ -618,6 +624,12 @@ impl IdGen<'_> {
     }
 }
 
+/// Each line in the details view is considered to be part of a "section". A section is the group
+/// of lines that can be selected together such as a hunk.
+///
+/// `SectionId` is used to track which lines belong to the same section. `Details` tracks the
+/// currently selected `SectionId` and when it renders a line with a matching it it'll highlight
+/// it.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct SectionId(&'static str);
 
@@ -697,8 +709,14 @@ impl CodeLineNumbers {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 enum DetailsLine {
-    Text { id: SectionId, line: Line<'static> },
-    TextToWrap { id: SectionId, text: String },
+    Text {
+        /// None if this line cannot be selected
+        id: Option<SectionId>,
+        line: Line<'static>,
+    },
+    TextToWrap {
+        text: String,
+    },
     Code(DetailsCodeLine),
     SectionSeparator,
 }
