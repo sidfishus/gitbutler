@@ -147,24 +147,24 @@ impl Details2 {
                 commit_id: commit, ..
             } => {
                 let commit = *commit;
-                self.spawn_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
+                self.poll_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
                     rendering::render_commit(commit, ctx, theme, id_gen, line_writer)
                 })
             }
             CliId::Branch { name, .. } => {
                 let name = name.to_owned();
-                self.spawn_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
+                self.poll_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
                     rendering::render_branch(name, ctx, theme, id_gen, line_writer)
                 })
             }
             CliId::Uncommitted { .. } => {
-                self.spawn_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
+                self.poll_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
                     rendering::render_uncommitted(ctx, theme, id_gen, line_writer)
                 })
             }
             CliId::UncommittedHunkOrFile(uncommitted) => {
                 let uncommitted = uncommitted.clone();
-                self.spawn_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
+                self.poll_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
                     rendering::render_uncommitted_hunk(uncommitted, ctx, theme, id_gen, line_writer)
                 })
             }
@@ -176,7 +176,7 @@ impl Details2 {
                 let commit = *commit_id;
                 let path = path.clone();
                 let id = id.clone();
-                self.spawn_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
+                self.poll_render_thread(ctx, move |ctx, theme, id_gen, line_writer| {
                     rendering::render_committed_file(
                         commit,
                         path,
@@ -206,7 +206,7 @@ impl Details2 {
         }
     }
 
-    fn spawn_render_thread<F>(&mut self, ctx: &Context, f: F) -> anyhow::Result<bool>
+    fn poll_render_thread<F>(&mut self, ctx: &Context, f: F) -> anyhow::Result<bool>
     where
         F: FnOnce(
                 &mut Context,
@@ -313,18 +313,17 @@ impl Details2 {
                             Position::First | Position::Middle | Position::Only => Some(line),
                             Position::Last => (!line.is_empty()).then_some(line),
                         })
+                        .map(|line| if line.is_empty() { " ".into() } else { line })
                     {
                         let Some(line_area) = areas.next() else {
                             break 'outer;
                         };
 
-                        let line = if line.is_empty() { " " } else { &*line };
-
                         if self.should_highlight_section(*id, tui_has_focus) {
                             frame
                                 .render_widget(Line::from(line).bg(selection_highlight), line_area);
                         } else {
-                            frame.render_widget(line, line_area);
+                            frame.render_widget(&*line, line_area);
                         }
                     }
                 }
